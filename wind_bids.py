@@ -10,12 +10,19 @@ def get_registered_wind_bmus() -> list:
     """
     endpoint = f"{BASE_URL}/unit/register"
     
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    
     params = {
-        "fuelType": "Wind",
+        "filter": {
+            "FuelType": "Wind",
+            "UnitType": "Generating"
+        },
         "format": "json"
     }
     
-    response = requests.get(endpoint, params=params)
+    response = requests.post(endpoint, json=params, headers=headers)
     
     if response.status_code != 200:
         raise requests.exceptions.HTTPError(
