@@ -69,3 +69,26 @@ def get_wind_bids(target_date: str, wind_bmus: list) -> pd.DataFrame:
     print(f"- Number of settlement periods with bids: {len(aggregated)}")
     
     return aggregated
+
+if __name__ == "__main__":
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    
+    target_date = "2026-11-01"  # Update with desired date
+    wind_bmus = ["T_ABRBO-1", "E_ABRTW-1"]  # Example BMUs
+    
+    print("\nRunning Wind Bids Analysis...")
+    print(f"Date: {target_date}")
+    print(f"Wind BMUs: {len(wind_bmus)} units")
+    
+    try:
+        results = get_wind_bids(target_date, wind_bmus)
+        print("\nResults:")
+        print(results)
+        
+        # Print summary statistics
+        print("\nSummary Statistics:")
+        print(results.describe())
+        
+    except Exception as e:
+        print(f"Error: {str(e)}")
