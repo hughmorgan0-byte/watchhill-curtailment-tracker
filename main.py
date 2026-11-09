@@ -11,7 +11,7 @@ def calculate_wind_cost(bid_volume: float, target_date: str) -> float:
     # Get merit order offers
     offers = constraints.get_merit_order_offers(target_date)
     
-    # Sort offers by price
+    # Sort offers by price/test
     offers = offers.sort_values('offerPrice')
     
     # Calculate cumulative volume
