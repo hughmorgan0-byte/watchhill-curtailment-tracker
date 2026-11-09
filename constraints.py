@@ -9,18 +9,26 @@ def get_wind_bids(target_date: str, wind_bmus: list) -> pd.DataFrame:
     Fetches Market-wide Bid Acceptance Volumes (BOAV) and aggregates 
     turn-down (bid) volume for Wind BMUs per settlement period.
     """
-    # Use the Wasted Wind Energy API endpoint
-    endpoint = "https://wastedwind.energy/2026-10-14"
+    # Use the explicit Acceptance Volumes (BOAV) endpoint for Bids
+    endpoint = f"{BASE_URL}/balancing/acceptances"
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
     
-    # Format parameters for Wasted Wind Energy API
+    # Format timestamps for API parameters
+    # From: Start of day
+    # To: End of day
+    from_timestamp = datetime.strptime(target_date, "%Y-%m-%d").strftime("%Y-%m-%dT00:00:00")
+    to_timestamp = datetime.strptime(target_date, "%Y-%m-%d").strftime("%Y-%m-%dT23:59:59")
+    
     params = {
-        "target_date": target_date,
-        "wind_bmus": ",".join(wind_bmus),
-        "format": "json"
+        "settlementDate": target_date.replace("-", ""),  # API requires YYYYMMDD format
+        "settlementPeriod": "1-48",  # Request all settlement periods in one call
+        "format": "json",
+        "from": from_timestamp,
+        "to": to_timestamp,
+        "BmUnit": ",".join(wind_bmus)  # Filter by our list of wind BMUs
     }
     
     response = requests.get(endpoint, params=params, headers=headers)
