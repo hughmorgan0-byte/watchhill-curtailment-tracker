@@ -9,7 +9,8 @@ def get_registered_wind_bmus() -> list:
     Fetches the complete list of registered wind BMUs from the Elexon API.
     """
     print("\nFetching registered wind BMUs...")
-    print(f"Endpoint: {BASE_URL}/unit/register")
+    endpoint = f"{BASE_URL}/unit/register"
+    print(f"Endpoint: {endpoint}")
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -26,7 +27,23 @@ def get_registered_wind_bmus() -> list:
     print("API Request Params:")
     print(params)
     
-    response = requests.post(endpoint, json=params, headers=headers)
+    # Try POST request first
+    try:
+        response = requests.post(endpoint, json=params, headers=headers)
+        if response.status_code == 200:
+            return process_response(response)
+    except Exception as e:
+        print(f"POST request failed: {str(e)}")
+    
+    # Fallback to GET request
+    try:
+        response = requests.get(endpoint, params=params, headers=headers)
+        if response.status_code == 200:
+            return process_response(response)
+    except Exception as e:
+        print(f"GET request failed: {str(e)}")
+    
+    raise requests.exceptions.RequestException("Both POST and GET requests failed")
     
     if response.status_code != 200:
         raise requests.exceptions.HTTPError(
@@ -93,5 +110,18 @@ def get_wind_bid_data(target_date: str) -> pd.DataFrame:
         print(aggregated)
         
         return aggregated, total_volume
+
+    def process_response(response):
+        """
+        Processes the API response and extracts BMU data.
+        """
+        data = response.json().get('data', [])
+        bmus = [row.get('bmUnit') for row in data if row.get('bmUnit')]
+    
+        print(f"Successfully fetched {len(bmus)} wind BMUs:")
+        print("- First 5 BMUs:", bmus[:5])
+        print("- Total BMUs:", len(bmus))
+    
+        return bmus
     
     return pd.DataFrame(), 0.0
