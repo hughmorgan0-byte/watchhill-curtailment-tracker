@@ -1,13 +1,36 @@
 import pandas as pd
 import requests
 from datetime import datetime
+import itertools
 
 BASE_URL = "https://data.elexon.co.uk/bmrs/api/v1"
+
+def get_registered_wind_bmus() -> list:
+    """
+    Fetches the complete list of registered wind BMUs from the Elexon API.
+    """
+    endpoint = f"{BASE_URL}/unit/register"
+    params = {
+        "fuelType": "Wind",
+        "format": "json"
+    }
+    
+    response = requests.get(endpoint, params=params)
+    
+    if response.status_code != 200:
+        raise requests.exceptions.HTTPError(
+            f"Error {response.status_code}: {response.text}\nRequest URL: {response.url}"
+        )
+    
+    data = response.json().get('data', [])
+    return [row.get('bmUnit') for row in data if row.get('bmUnit')]
 
 def get_wind_bids(target_date: str, wind_bmus: list) -> pd.DataFrame:
     """
     Fetches Market-wide Bid Acceptance Volumes (BOAV) and aggregates 
     turn-down (bid) volume for Wind BMUs per settlement period.
+    
+    Now includes NIV stack and cost calculations.
     """
     # Use the explicit Acceptance Volumes (BOAV) endpoint for Bids
     endpoint = f"{BASE_URL}/balancing/acceptances"
@@ -60,25 +83,93 @@ def get_wind_bids(target_date: str, wind_bmus: list) -> pd.DataFrame:
     # Aggregate total volume per settlement period
     aggregated = df.groupby('settlementPeriod')['wind_bid_off_volume'].sum().reset_index()
     
-    # Print key results
-    total_volume = aggregated['wind_bid_off_volume'].sum()
-    avg_bid = aggregated['wind_bid_off_volume'].mean()
-    print(f"\nWind Bid Data for {target_date}")
-    print("-" * 60)
-    print(f"Total bid volume: £{total_volume:.2f} MWh")
-    print(f"Average bid per period: £{avg_bid:.2f} MWh")
-    print(f"Settlement periods with bids: {len(aggregated)}")
-    print("\nDetailed Bid Data:")
-    print(aggregated)
+    # Calculate NIV stack
+    niv_stack = calculate_niv_impact(target_date)
+    
+    # Calculate adjusted bid-off volume
+    adjusted_volume = total_volume - niv_stack
+    
+    # Get merit order offers
+    offers = get_merit_order_offers(target_date)
+    
+    # Calculate cost
+    total_cost = calculate_cost(offers, adjusted_volume)
+    
+    # Print results
+    print("\nWind Bid Analysis Results")
+    print("-" * 80)
+    print(f"Date: {target_date}")
+    print(f"Total bid-off volume: £{total_volume:.2f} MWh")
+    print(f"NIV stack impact: £{niv_stack:.2f} MWh")
+    print(f"Adjusted volume: £{adjusted_volume:.2f} MWh")
+    print(f"Total cost: £{total_cost:.2f} million")
     
     return aggregated
+
+def calculate_niv_impact(target_date: str) -> float:
+    """
+    Calculates the NIV (National Intergrestrial Variability) stack impact
+    for the given date.
+    """
+    # API endpoint for NIV data
+    endpoint = f"{BASE_URL}/niv/{target_date}"
+    
+    response = requests.get(endpoint)
+    
+    if response.status_code != 200:
+        raise requests.exceptions.HTTPError(
+            f"Error {response.status_code}: {response.text}\nRequest URL: {response.url}"
+        )
+    
+    data = response.json().get('data', [])
+    return sum(row.get('nivVolume', 0) for row in data)
+
+def get_merit_order_offers(target_date: str) -> pd.DataFrame:
+    """
+    Fetches merit order offers for the given date.
+    """
+    endpoint = f"{BASE_URL}/meritorder/offers"
+    
+    params = {
+        "date": target_date,
+        "format": "json"
+    }
+    
+    response = requests.get(endpoint, params=params)
+    
+    if response.status_code != 200:
+        raise requests.exceptions.HTTPError(
+            f"Error {response.status_code}: {response.text}\nRequest URL: {response.url}"
+        )
+    
+    data = response.json().get('data', [])
+    return pd.DataFrame(data)
+
+def calculate_cost(offers: pd.DataFrame, volume: float) -> float:
+    """
+    Calculates the cost based on merit order offers up to the given volume.
+    """
+    # Sort offers by price
+    offers = offers.sort_values('offerPrice')
+    
+    # Calculate cumulative volume
+    offers['cumulativeVolume'] = offers['offerVolume'].cumsum()
+    
+    # Find where cumulative volume exceeds our adjusted volume
+    mask = offers['cumulativeVolume'] <= volume
+    relevant_offers = offers[mask]
+    
+    # Calculate total cost
+    total_cost = (relevant_offers['offerVolume'] * relevant_offers['offerPrice']).sum()
+    
+    return total_cost / 1000000  # Convert to millions
 
 if __name__ == "__main__":
     import logging
     logging.basicConfig(level=logging.INFO)
     
     target_date = "2026-10-14"  # Specific date for comparison
-    wind_bmus = ["T_ABRBO-1", "E_ABRTW-1"]  # Example BMUs
+    wind_bmus = get_registered_wind_bmus()  # Get all wind BMUs
     
     print("\nRunning Wind Bids Analysis...")
     print(f"Date: {target_date}")
