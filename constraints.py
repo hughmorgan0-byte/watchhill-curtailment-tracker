@@ -15,14 +15,15 @@ def get_registered_wind_bmus() -> list:
         "Format": "json"
     }
     
+    response = requests.get(endpoint, params=params)
+    
     # Try with different API parameter casing if needed
     if response.status_code == 404:
         params = {
             "fuelType": "Wind",
             "format": "json"
         }
-    
-    response = requests.get(endpoint, params=params)
+        response = requests.get(endpoint, params=params)
     
     if response.status_code != 200:
         raise requests.exceptions.HTTPError(
