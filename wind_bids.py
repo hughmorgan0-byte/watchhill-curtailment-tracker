@@ -28,7 +28,7 @@ def get_wind_bid_data(target_date: str) -> pd.DataFrame:
     """
     Fetches wind bid data for a given date and calculates the total bid volume.
     """
-    wind_bmus = get_registered_wind_bmus()
+    wind_bmus = fetch_wind_bmus()
     endpoint = f"{BASE_URL}/balancing/acceptances"
     
     headers = {
