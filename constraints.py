@@ -63,10 +63,13 @@ def get_wind_bids(target_date: str, wind_bmus: list) -> pd.DataFrame:
     # Print key results
     total_volume = aggregated['wind_bid_off_volume'].sum()
     avg_bid = aggregated['wind_bid_off_volume'].mean()
-    print(f"\nWind Bids for {target_date}:")
-    print(f"- Total bid volume: {total_volume:.2f} MWh")
-    print(f"- Average bid per period: {avg_bid:.2f} MWh")
-    print(f"- Number of settlement periods with bids: {len(aggregated)}")
+    print(f"\nWind Bid Data for {target_date}")
+    print("-" * 60)
+    print(f"Total bid volume: £{total_volume:.2f} MWh")
+    print(f"Average bid per period: £{avg_bid:.2f} MWh")
+    print(f"Settlement periods with bids: {len(aggregated)}")
+    print("\nDetailed Bid Data:")
+    print(aggregated)
     
     return aggregated
 
