@@ -83,6 +83,10 @@ def get_wind_bids(target_date: str, wind_bmus: list) -> pd.DataFrame:
     # Aggregate total volume per settlement period
     aggregated = df.groupby('settlementPeriod')['wind_bid_off_volume'].sum().reset_index()
     
+    # Calculate total volume and average bid
+    total_volume = aggregated['wind_bid_off_volume'].sum()
+    avg_bid = aggregated['wind_bid_off_volume'].mean()
+    
     # Calculate NIV stack
     niv_stack = calculate_niv_impact(target_date)
     
