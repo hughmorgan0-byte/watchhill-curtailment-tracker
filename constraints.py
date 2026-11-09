@@ -132,17 +132,30 @@ def calculate_adjusted_constraint_cost(target_date: str, average_offer_price: fl
     df_merged['wind_bid_off_volume'] = df_merged['wind_bid_off_volume'].fillna(0.0)
     
     def calc_replacement(row):
+        """Calculate adjusted replacement volume based on market state.
+        
+        Args:
+            row: DataFrame row containing 'wind_bid_off_volume' and 'NIV'
+            
+        Returns:
+            float: Adjusted replacement volume in MWh
+            
+        Logic:
+        - If market is Short (NIV > 0): All bid-off wind must be replaced
+        - If market is Long (NIV < 0): Only excess wind beyond market length needs replacement
+        """
         vol = row['wind_bid_off_volume']
         niv = row['NIV']
         
         if vol == 0:
             return 0.0
-        # If Market is Short (NIV > 0): Replacement Vol = 100% of Wind Bid Off
+            
+        # Market is Short (NIV > 0): All bid-off wind must be replaced
         if niv > 0:
             return vol
-        # If Market is Long (NIV < 0): Replacement Vol = Max(0, Wind Bid Off - |NIV|)
-        else:
-            return max(0.0, vol - abs(niv))
+            
+        # Market is Long (NIV < 0): Only excess wind beyond market length needs replacement
+        return max(0.0, vol - abs(niv))
 
     df_merged['adjusted_replacement_volume'] = df_merged.apply(calc_replacement, axis=1)
     df_merged['replacement_cost_gbp'] = df_merged['adjusted_replacement_volume'] * average_offer_price
