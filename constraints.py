@@ -83,10 +83,17 @@ def get_wind_bids(target_date: str, wind_bmus: list) -> pd.DataFrame:
     # Acceptances require the 'all' endpoint for market-wide data
     # Construct URL with settlement period (1-48)
     endpoint = f"{BASE_URL}/balancing/acceptances"
+    
+    # Format target date as YYYY-MM-DDTHH:mm:ss for timestamp parameters
+    target_timestamp = datetime.strptime(target_date, "%Y-%m-%d").strftime("%Y-%m-%dT%H:%M:%S")
+    
     params = {
         "settlementDate": target_date.replace("-", ""),  # API requires YYYYMMDD format
         "settlementPeriod": "1",  # Default to first SP, we'll aggregate all later
-        "format": "json"
+        "format": "json",
+        "from": f"{target_timestamp}",
+        "to": f"{target_timestamp.replace('T', ' ')[:16]}23:59:59",
+        "BmUnit": ",".join(wind_bmus)  # Filter by our list of wind BMUs
     }
     
     headers = {
