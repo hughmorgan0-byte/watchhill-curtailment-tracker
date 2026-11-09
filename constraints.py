@@ -9,11 +9,18 @@ def get_registered_wind_bmus() -> list:
     """
     Fetches the complete list of registered wind BMUs from the Elexon API.
     """
-    endpoint = f"{BASE_URL}/unit/register"
+    endpoint = f"{BASE_URL}/unit/register/"
     params = {
-        "fuelType": "Wind",
-        "format": "json"
+        "FuelType": "Wind",
+        "Format": "json"
     }
+    
+    # Try with different API parameter casing if needed
+    if response.status_code == 404:
+        params = {
+            "fuelType": "Wind",
+            "format": "json"
+        }
     
     response = requests.get(endpoint, params=params)
     
@@ -22,7 +29,18 @@ def get_registered_wind_bmus() -> list:
             f"Error {response.status_code}: {response.text}\nRequest URL: {response.url}"
         )
     
-    data = response.json().get('data', [])
+    data = []
+    while True:
+        current_data = response.json().get('data', [])
+        data.extend(current_data)
+        
+        # Check for pagination
+        next_page = response.links.get('next', {}).get('url')
+        if next_page:
+            response = requests.get(next_page)
+        else:
+            break
+    
     return [row.get('bmUnit') for row in data if row.get('bmUnit')]
 
 def get_wind_bids(target_date: str, wind_bmus: list) -> pd.DataFrame:
