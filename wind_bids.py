@@ -4,60 +4,22 @@ from datetime import datetime
 
 BASE_URL = "https://data.elexon.co.uk/bmrs/api/v1"
 
-def get_registered_wind_bmus() -> list:
+def fetch_wind_bmus() -> list:
     """
     Fetches the complete list of registered wind BMUs from the Elexon API.
     """
-    print("\nFetching registered wind BMUs...")
-    endpoint = f"{BASE_URL}/unit/register"
-    print(f"Endpoint: {endpoint}")
-    
+    endpoint = f"{BASE_URL}/reference/bmunits/all"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
     
-    params = {
-        "filter": {
-            "FuelType": "Wind",
-            "UnitType": "Generating"
-        },
-        "format": "json"
-    }
+    response = requests.get(endpoint, headers=headers)
+    response.raise_for_status()
     
-    print("API Request Params:")
-    print(params)
+    data = response.json().get('bmUnits', [])
+    wind_bmus = [unit['bmUnit'] for unit in data if unit.get('fuelType') == "WIND"]
     
-    # Try POST request first
-    try:
-        response = requests.post(endpoint, json=params, headers=headers)
-        if response.status_code == 200:
-            return process_response(response)
-    except Exception as e:
-        print(f"POST request failed: {str(e)}")
-    
-    # Fallback to GET request
-    try:
-        response = requests.get(endpoint, params=params, headers=headers)
-        if response.status_code == 200:
-            return process_response(response)
-    except Exception as e:
-        print(f"GET request failed: {str(e)}")
-    
-    raise requests.exceptions.RequestException("Both POST and GET requests failed")
-    
-    if response.status_code != 200:
-        raise requests.exceptions.HTTPError(
-            f"Error {response.status_code}: {response.text}\nRequest URL: {response.url}"
-        )
-    
-    data = response.json().get('data', [])
-    bmus = [row.get('bmUnit') for row in data if row.get('bmUnit')]
-    
-    print(f"Successfully fetched {len(bmus)} wind BMUs:")
-    print("- First 5 BMUs:", bmus[:5])
-    print("- Total BMUs:", len(bmus))
-    
-    return bmus
+    return wind_bmus
 
 def get_wind_bid_data(target_date: str) -> pd.DataFrame:
     """
