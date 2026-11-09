@@ -9,12 +9,27 @@ def get_registered_wind_bmus() -> list:
     """
     Fetches the complete list of registered wind BMUs from the Elexon API.
     """
-    endpoint = f"{BASE_URL}/unit/register"
-    params = {
-        "FuelType": "Wind",  # API requires uppercase parameter name
-        "unitType": "Generating",
-        "format": "json"
-    }
+    endpoint = f"{BASE_URL}/unit/register/"
+    
+    # Try different parameter combinations
+    params = [
+        {"FuelType": "Wind", "unitType": "Generating", "format": "json"},
+        {"fuelType": "Wind", "format": "json"},
+        {"FuelType": "Wind", "UnitType": "Generating", "Format": "json"}
+    ]
+    
+    for attempt, params_dict in enumerate(params):
+        try:
+            response = requests.get(endpoint, params=params_dict)
+            if response.status_code == 200:
+                break
+        except requests.exceptions.RequestException as e:
+            print(f"Attempt {attempt + 1} failed: {str(e)}")
+    
+    if response.status_code != 200:
+        raise requests.exceptions.HTTPError(
+            f"Error {response.status_code}: {response.text}\nRequest URL: {response.url}"
+        )
     
     response = requests.get(endpoint, params=params)
     
