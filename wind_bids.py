@@ -36,6 +36,9 @@ def get_wind_bid_data(target_date: str) -> pd.DataFrame:
     """
     Fetches wind bid data for a given date and calculates the total bid volume.
     """
+    """
+    Fetches wind bid data for a given date and calculates the total bid volume.
+    """
     wind_bmus = get_registered_wind_bmus()
     endpoint = f"{BASE_URL}/balancing/acceptances"
     
@@ -79,6 +82,6 @@ def get_wind_bid_data(target_date: str) -> pd.DataFrame:
         print("\nDetailed Bid Data:")
         print(aggregated)
         
-        return aggregated
+        return aggregated, total_volume
     
-    return pd.DataFrame()
+    return pd.DataFrame(), 0.0
