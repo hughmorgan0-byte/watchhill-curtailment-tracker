@@ -4,15 +4,28 @@ def get_wind_bids(target_date: str, wind_bmus: list) -> pd.DataFrame:
     turn-down (bid) volume for Wind BMUs per settlement period.
     """
     # Use the explicit Acceptance Volumes (BOAV) endpoint for Bids
-    # This requires YYYY-MM-DD format
-    endpoint = f"{BASE_URL}/balancing/settlement/acceptance/volumes/all/Bid/{target_date}"
+    endpoint = f"{BASE_URL}/balancing/acceptances"
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
     
-    # We fetch ALL bids for the date to avoid URL length limits with hundreds of BMUs
-    response = requests.get(endpoint, params={"format": "json"}, headers=headers)
+    # Format timestamps for API parameters
+    # From: Start of day
+    # To: End of day
+    from_timestamp = datetime.strptime(target_date, "%Y-%m-%d").strftime("%Y-%m-%dT00:00:00")
+    to_timestamp = datetime.strptime(target_date, "%Y-%m-%d").strftime("%Y-%m-%dT23:59:59")
+    
+    params = {
+        "settlementDate": target_date.replace("-", ""),  # API requires YYYYMMDD format
+        "settlementPeriod": "1-48",  # Request all settlement periods in one call
+        "format": "json",
+        "from": from_timestamp,
+        "to": to_timestamp,
+        "BmUnit": ",".join(wind_bmus)  # Filter by our list of wind BMUs
+    }
+    
+    response = requests.get(endpoint, params=params, headers=headers)
     
     if response.status_code != 200:
         raise requests.exceptions.HTTPError(
@@ -25,17 +38,15 @@ def get_wind_bids(target_date: str, wind_bmus: list) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame({'settlementPeriod': range(1, 49), 'wind_bid_off_volume': 0.0})
 
-    # Filter the market data against our known Wind BMUs
-    bmu_col = next((c for c in ['bmUnit', 'nationalGridBmUnitId', 'elexonBmUnitId'] if c in df.columns), 'bmUnit')
-    df = df[df[bmu_col].isin(wind_bmus)].copy()
-
-    # The BOAV endpoint provides pre-calculated 'acceptanceVolume' in MWh
-    vol_col = next((c for c in ['acceptanceVolume', 'volume'] if c in df.columns), 'acceptanceVolume')
-    if vol_col not in df.columns:
+    # The acceptances endpoint provides 'levelFrom' and 'levelTo' in MW
+    # We'll calculate the average bid volume
+    if 'levelFrom' in df.columns and 'levelTo' in df.columns:
+        df['wind_bid_off_volume'] = (df['levelFrom'] + df['levelTo']) / 2
+    else:
         return pd.DataFrame({'settlementPeriod': range(1, 49), 'wind_bid_off_volume': 0.0})
 
-    # Bids are returned as negative volumes, convert to absolute turn-down volume
-    df['wind_bid_off_volume'] = df[vol_col].abs()
+    # Convert MW to MWh by multiplying by 0.5 (since each SP is 30 minutes)
+    df['wind_bid_off_volume'] *= 0.5
     
     sp_col = next((c for c in ['settlementPeriod', 'settlementPeriodFrom'] if c in df.columns), 'settlementPeriod')
     df['settlementPeriod'] = pd.to_numeric(df[sp_col])
