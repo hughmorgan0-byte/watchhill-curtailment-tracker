@@ -11,7 +11,7 @@ def get_registered_wind_bmus() -> list:
     """
     endpoint = f"{BASE_URL}/unit/register"
     params = {
-        "fuelType": "Wind",
+        "FuelType": "Wind",  # API requires uppercase parameter name
         "unitType": "Generating",
         "format": "json"
     }
