@@ -2,6 +2,7 @@ import pandas as pd
 import requests
 from datetime import datetime
 import itertools
+import wind_bids
 
 BASE_URL = "https://data.elexon.co.uk/bmrs/api/v1"
 
@@ -204,20 +205,12 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     
     target_date = "2026-10-14"  # Specific date for comparison
-    wind_bmus = get_registered_wind_bmus()  # Get all wind BMUs
     
     print("\nRunning Wind Bids Analysis...")
     print(f"Date: {target_date}")
-    print(f"Wind BMUs: {len(wind_bmus)} units")
     
     try:
-        results = get_wind_bids(target_date, wind_bmus)
-        print("\nResults:")
-        print(results)
-        
-        # Print summary statistics
-        print("\nSummary Statistics:")
-        print(results.describe())
+        wind_bids.get_wind_bid_data(target_date)
         
     except Exception as e:
         print(f"Error: {str(e)}")
