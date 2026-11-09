@@ -81,14 +81,23 @@ def get_wind_bids(target_date: str, wind_bmus: list) -> pd.DataFrame:
     turn-down (bid) volume for Wind BMUs per settlement period.
     """
     # Acceptances require the 'all' endpoint for market-wide data
-    endpoint = f"{BASE_URL}/balancing/acceptances/all"
+    # Construct URL with settlement period (1-48)
+    endpoint = f"{BASE_URL}/balancing/acceptances"
     params = {
-        "settlementDate": target_date,
+        "settlementDate": target_date.replace("-", ""),  # API requires YYYYMMDD format
+        "settlementPeriod": "1",  # Default to first SP, we'll aggregate all later
         "format": "json"
     }
     
-    response = requests.get(endpoint, params=params)
-    response.raise_for_status()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+    }
+    
+    response = requests.get(endpoint, params=params, headers=headers)
+    if response.status_code != 200:
+        raise requests.exceptions.HTTPError(
+            f"Error {response.status_code}: {response.text}\nRequest URL: {response.url}"
+        )
     
     data = response.json().get('data', [])
     df = pd.DataFrame(data)
