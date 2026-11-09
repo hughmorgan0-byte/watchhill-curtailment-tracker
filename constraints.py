@@ -1,3 +1,9 @@
+import pandas as pd
+import requests
+from datetime import datetime
+
+BASE_URL = "https://data.elexon.co.uk/bmrs/api/v1"
+
 def get_wind_bids(target_date: str, wind_bmus: list) -> pd.DataFrame:
     """
     Fetches Market-wide Bid Acceptance Volumes (BOAV) and aggregates 
