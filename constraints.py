@@ -4,6 +4,31 @@ from datetime import datetime
 
 BASE_URL = "https://data.elexon.co.uk/bmrs/api/v1"
 
+def is_within_range(value, lower_bound, upper_bound):
+    """Check if a value is within a specified range (inclusive).
+    
+    Args:
+        value (float|int): The value to check
+        lower_bound (float|int): The minimum allowed value
+        upper_bound (float|int): The maximum allowed value
+        
+    Returns:
+        bool: True if value is within range, False otherwise
+    """
+    return lower_bound <= value <= upper_bound
+
+def is_type(value, expected_type):
+    """Check if a value is of a specified type.
+    
+    Args:
+        value: The value to check
+        expected_type (type): The type we expect the value to be
+        
+    Returns:
+        bool: True if value is of expected_type, False otherwise
+    """
+    return type(value) is expected_type
+
 def get_wind_bmu_ids() -> list:
     """Fetches registered BM Units from Elexon and filters for Wind generators."""
     url = f"{BASE_URL}/reference/bmunits/all"
