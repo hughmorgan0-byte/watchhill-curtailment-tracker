@@ -13,20 +13,16 @@ Elexon BMRS API endpoints used
     JSON list of every Balancing Mechanism Unit with metadata including
     ``fuelType``.  Used to filter for WIND BMUs.
 
-- ``datasets/BOALF``  (Bid-Offer Acceptance Levels File)
-    CSV of accepted bid/offer *levels* (MW) per settlement period, BMU and
-    pair.  ``pairId < 0`` → bid (reduction); ``pairId > 0`` → offer (increase).
-    A wind curtailment bid is identified by ``levelFrom > levelTo`` on a
-    negative ``pairId``.
+- ``balancing/bid-offer``
+    Per-BMU bid-offer data.  Returns JSON with fields:
+    ``settlementDate``, ``settlementPeriod``, ``bmUnit``, ``nationalGridBmUnit``,
+    ``timeFrom``, ``timeTo``, ``levelFrom``, ``levelTo``, ``bid``, ``offer``,
+    ``pairId``.
 
-- ``datasets/BOAV``  (Bid-Offer Acceptance Volumes File)
-    CSV of accepted bid/offer *volumes* (MW) per settlement period, BMU and
-    pair.  Used as an alternative to BOALF for the accepted MW figure.
-
-- ``datasets/BOD``  (Bid-Offer Data)
-    CSV of the *submitted* bid/offer prices (£/MWh) and volumes (MW) per
-    settlement period, BMU and pair.  We match on BMU + period + pairId to
-    retrieve the price that was actually accepted.
+    - ``pairId < 0`` → BID (reduction).  Price is in the ``bid`` field.
+    - ``pairId > 0`` → OFFER (increase).  Price is in the ``offer`` field.
+    - A wind curtailment bid is identified by ``levelFrom > levelTo`` on a
+      negative ``pairId``.
 
 Sign convention (GB Balancing Mechanism)
 ----------------------------------------
@@ -40,7 +36,6 @@ Sign convention (GB Balancing Mechanism)
 
 from __future__ import annotations
 
-import io
 import time
 import logging
 from typing import Optional
@@ -56,7 +51,7 @@ SETTLEMENT_PERIODS = 48
 PERIOD_DURATION_HOURS = 0.5
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 2.0
-API_CALL_DELAY = 1.0  # polite delay between successive API calls (seconds)
+API_CALL_DELAY = 0.5  # polite delay between successive per-BMU API calls (seconds)
 
 logger = logging.getLogger(__name__)
 
@@ -154,34 +149,61 @@ def _fetch_bmu_reference() -> pd.DataFrame:
     return df
 
 
-def _fetch_dataset_csv(dataset: str, target_date: str) -> pd.DataFrame:
+def _query_bid_offer(bmu_id: str, target_date: str) -> pd.DataFrame:
     """
-    Fetch a BMRS dataset as CSV for a given settlement date.
+    Query the per-BMU bid-offer endpoint for a given settlement date.
+
+    Endpoint: ``GET {API_BASE}/balancing/bid-offer``
+    Parameters: ``bmUnit``, ``from``, ``to`` (settlement date, time ignored).
+
+    The response JSON has a ``data`` array where each item contains:
+    ``settlementDate``, ``settlementPeriod``, ``bmUnit``,
+    ``nationalGridBmUnit``, ``timeFrom``, ``timeTo``,
+    ``levelFrom``, ``levelTo``, ``bid``, ``offer``, ``pairId``.
 
     Parameters
     ----------
-    dataset : str
-        One of ``"BOALF"``, ``"BOAV"``, ``"BOD"``.
+    bmu_id : str
+        The BMU identifier (e.g. ``"T_DRAXX-1"``).
     target_date : str
         Settlement date in ``YYYY-MM-DD`` format.
 
     Returns
     -------
     pd.DataFrame
-        Parsed CSV data with normalised (lower-case) column names.
+        One row per bid/offer pair with columns:
+        ``settlementPeriod``, ``pairId``, ``levelFrom``, ``levelTo``,
+        ``bid``, ``offer``, ``bmUnit``, ``nationalGridBmUnit``.
+        Empty DataFrame if no data returned.
     """
-    url = f"{API_BASE}/datasets/{dataset}"
-    params = {"date": target_date}
-    logger.info("Fetching dataset %s for %s", dataset, target_date)
-    resp = _get_with_retry(url, params=params)
+    url = f"{API_BASE}/balancing/bid-offer"
+    params = {
+        "bmUnit": bmu_id,
+        "from": target_date,
+        "to": target_date,
+    }
 
-    text = resp.text
-    if not text.strip():
-        logger.warning("Empty response for dataset %s on %s", dataset, target_date)
+    resp = _get_with_retry(url, params=params)
+    payload = resp.json()
+
+    # Extract the data array
+    records: list[dict] = []
+    if isinstance(payload, dict):
+        records = payload.get("data", [])
+    elif isinstance(payload, list):
+        records = payload
+
+    if not records:
         return pd.DataFrame()
 
-    df = pd.read_csv(io.StringIO(text))
+    df = pd.DataFrame(records)
     df.columns = [c.strip().lower() for c in df.columns]
+
+    # Ensure numeric types
+    for col in ("settlementperiod", "pairid", "levelfrom", "levelto", "bid", "offer"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
     return df
 
 
@@ -217,11 +239,6 @@ def _find_column(
     return None
 
 
-def _ensure_int_series(series: pd.Series) -> pd.Series:
-    """Convert a Series to int64, coercing unparseable values to NaN then dropping."""
-    return pd.to_numeric(series, errors="coerce").astype("Int64")
-
-
 # ---------------------------------------------------------------------------
 # Public API – the three required functions
 # ---------------------------------------------------------------------------
@@ -233,7 +250,7 @@ def get_curtailed_wind_bmus(target_date: str) -> pd.DataFrame:
     Steps
     -----
     1. Fetch the BMU reference and filter to ``fuelType == "WIND"``.
-    2. Fetch the BOALF dataset for ``target_date``.
+    2. For each wind BMU, query ``balancing/bid-offer`` for the target date.
     3. Filter to rows where ``pairId < 0`` (bid) and ``levelFrom > levelTo``
        (the acceptance level moved the unit *down*, i.e. output was reduced).
     4. Return the matching BMU details together with the acceptance levels.
@@ -286,7 +303,7 @@ def get_curtailed_wind_bmus(target_date: str) -> pd.DataFrame:
                          list(wind_bmus.columns))
             return empty_result
 
-        wind_bmu_ids = set(wind_bmus[bmu_id_col_ref].astype(str).str.strip().tolist())
+        wind_bmu_ids = wind_bmus[bmu_id_col_ref].astype(str).str.strip().tolist()
         logger.info("Found %d WIND BMUs in reference data.", len(wind_bmu_ids))
 
         # Build a name lookup
@@ -300,59 +317,48 @@ def get_curtailed_wind_bmus(target_date: str) -> pd.DataFrame:
             for _, row in wind_bmus.iterrows():
                 name_map[str(row[bmu_id_col_ref]).strip()] = str(row[name_col_ref])
 
-        # Polite delay before next API call
-        time.sleep(API_CALL_DELAY)
+        # 2 – Query bid-offer per BMU and collect curtailed bids
+        all_curtailed: list[pd.DataFrame] = []
+        for i, bmu_id in enumerate(wind_bmu_ids):
+            if i > 0:
+                time.sleep(API_CALL_DELAY)
 
-        # 2 – BOALF for the target date
-        boalf = _fetch_dataset_csv("BOALF", target_date)
-        if boalf.empty:
-            logger.warning("BOALF returned no data for %s.", target_date)
+            try:
+                bo_data = _query_bid_offer(bmu_id, target_date)
+            except (requests.exceptions.RequestException, ValueError) as exc:
+                logger.warning("Skipping BMU %s: %s", bmu_id, exc)
+                continue
+
+            if bo_data.empty:
+                continue
+
+            # Filter: bids only (pairId < 0) and level reduced (levelFrom > levelTo)
+            mask = (
+                (bo_data["pairid"] < 0)
+                & (bo_data["levelfrom"] > bo_data["levelto"])
+            )
+            curtailed = bo_data[mask].copy()
+
+            if not curtailed.empty:
+                curtailed["elexonBmUnit"] = bmu_id
+                all_curtailed.append(curtailed)
+
+        if not all_curtailed:
+            logger.info("No curtailed wind bids found for %s.", target_date)
             return empty_result
 
-        # Identify columns in BOALF
-        bmu_col = _find_column(
-            boalf,
-            ["elexonbmuunit", "elexonbmunits"],
-            substring="elexon",
-        )
-        if bmu_col is None:
-            bmu_col = _find_column(boalf, ["bmunit", "bmu"], substring="bmu")
-        pair_col = _find_column(boalf, ["pairid", "pair_id"], substring="pair")
-        lf_col = _find_column(boalf, ["levelfrom", "level_from"], substring="levelfrom")
-        lt_col = _find_column(boalf, ["levelto", "level_to"], substring="levelto")
-        sp_col = _find_column(boalf, ["settlementperiod", "settlement_period"], substring="settlement")
-
-        if None in (bmu_col, pair_col, lf_col, lt_col, sp_col):
-            logger.error("Missing required columns in BOALF. Columns: %s", list(boalf.columns))
-            return empty_result
-
-        # 3 – Type conversions and filter
-        boalf[bmu_col] = boalf[bmu_col].astype(str).str.strip()
-        boalf[pair_col] = pd.to_numeric(boalf[pair_col], errors="coerce")
-        boalf[lf_col] = pd.to_numeric(boalf[lf_col], errors="coerce")
-        boalf[lt_col] = pd.to_numeric(boalf[lt_col], errors="coerce")
-        boalf[sp_col] = pd.to_numeric(boalf[sp_col], errors="coerce")
-
-        mask = (
-            (boalf[bmu_col].isin(wind_bmu_ids))
-            & (boalf[pair_col] < 0)
-            & (boalf[lf_col] > boalf[lt_col])
-        )
-        curtailed = boalf[mask].copy()
-
-        if curtailed.empty:
-            logger.info("No curtailed wind bids found in BOALF for %s.", target_date)
-            return empty_result
+        # 3 – Combine all results
+        combined = pd.concat(all_curtailed, ignore_index=True)
 
         # 4 – Build result DataFrame with consistent types
         result = pd.DataFrame({
-            "elexonBmUnit": curtailed[bmu_col].values,
-            "bmUnitName": curtailed[bmu_col].map(name_map).fillna("Unknown").values,
-            "settlementPeriod": curtailed[sp_col].astype(int).values,
-            "pairId": curtailed[pair_col].astype(int).values,
-            "levelFrom": curtailed[lf_col].values,
-            "levelTo": curtailed[lt_col].values,
-            "acceptedVolumeMW": (curtailed[lf_col] - curtailed[lt_col]).values,
+            "elexonBmUnit": combined["elexonBmUnit"].values,
+            "bmUnitName": combined["elexonBmUnit"].map(name_map).fillna("Unknown").values,
+            "settlementPeriod": combined["settlementperiod"].astype(int).values,
+            "pairId": combined["pairid"].astype(int).values,
+            "levelFrom": combined["levelfrom"].values,
+            "levelTo": combined["levelto"].values,
+            "acceptedVolumeMW": (combined["levelfrom"] - combined["levelto"]).values,
         })
 
         logger.info("Identified %d curtailed wind bid record(s) across %d BMU(s).",
@@ -368,8 +374,8 @@ def get_accepted_bid_prices(target_date: str, bmu_ids: list[str]) -> pd.DataFram
     """
     Retrieve the submitted bid prices (£/MWh) for the accepted wind bids.
 
-    Queries the ``BOD`` (Bid-Offer Data) dataset and matches on
-    BMU + settlement period + pairId to the accepted bids.
+    Queries the ``balancing/bid-offer`` endpoint for each BMU and extracts
+    the ``bid`` price field (valid for ``pairId < 0``).
 
     Parameters
     ----------
@@ -387,51 +393,46 @@ def get_accepted_bid_prices(target_date: str, bmu_ids: list[str]) -> pd.DataFram
     empty_result = pd.DataFrame(columns=["elexonBmUnit", "settlementPeriod", "pairId", "price"])
 
     try:
-        bod = _fetch_dataset_csv("BOD", target_date)
-        if bod.empty:
-            logger.warning("BOD returned no data for %s.", target_date)
+        all_prices: list[pd.DataFrame] = []
+
+        for i, bmu_id in enumerate(bmu_ids):
+            if i > 0:
+                time.sleep(API_CALL_DELAY)
+
+            try:
+                bo_data = _query_bid_offer(bmu_id, target_date)
+            except (requests.exceptions.RequestException, ValueError) as exc:
+                logger.warning("Skipping BMU %s: %s", bmu_id, exc)
+                continue
+
+            if bo_data.empty:
+                continue
+
+            # Filter to bids only (pairId < 0)
+            mask = bo_data["pairid"] < 0
+            bids = bo_data[mask].copy()
+
+            if bids.empty:
+                continue
+
+            # The 'bid' column holds the price for bid pairs
+            price_col = "bid" if "bid" in bids.columns else None
+            if price_col is None:
+                continue
+
+            price_records = pd.DataFrame({
+                "elexonBmUnit": bmu_id,
+                "settlementPeriod": bids["settlementperiod"].astype(int).values,
+                "pairId": bids["pairid"].astype(int).values,
+                "price": bids[price_col].values,
+            })
+            all_prices.append(price_records)
+
+        if not all_prices:
+            logger.warning("No bid price data found for the given BMU IDs on %s.", target_date)
             return empty_result
 
-        # Identify columns
-        bmu_col = _find_column(
-            bod,
-            ["elexonbmuunit", "elexonbmunits"],
-            substring="elexon",
-        )
-        if bmu_col is None:
-            bmu_col = _find_column(bod, ["bmunit", "bmu"], substring="bmu")
-        pair_col = _find_column(bod, ["pairid", "pair_id"], substring="pair")
-        sp_col = _find_column(bod, ["settlementperiod", "settlement_period"], substring="settlement")
-        price_col = _find_column(bod, ["price", "bidprice", "bid_price"], substring="price")
-
-        if None in (bmu_col, pair_col, sp_col, price_col):
-            logger.error("Missing required columns in BOD. Columns: %s", list(bod.columns))
-            return empty_result
-
-        # Type conversions
-        bod[bmu_col] = bod[bmu_col].astype(str).str.strip()
-        bod[pair_col] = pd.to_numeric(bod[pair_col], errors="coerce")
-        bod[sp_col] = pd.to_numeric(bod[sp_col], errors="coerce")
-        bod[price_col] = pd.to_numeric(bod[price_col], errors="coerce")
-
-        # Filter to our BMUs and bids only
-        mask = (
-            (bod[bmu_col].isin(bmu_ids))
-            & (bod[pair_col] < 0)
-        )
-        filtered = bod[mask].copy()
-
-        if filtered.empty:
-            logger.warning("No BOD records matched for the given BMU IDs on %s.", target_date)
-            return empty_result
-
-        result = pd.DataFrame({
-            "elexonBmUnit": filtered[bmu_col].values,
-            "settlementPeriod": filtered[sp_col].astype(int).values,
-            "pairId": filtered[pair_col].astype(int).values,
-            "price": filtered[price_col].values,
-        })
-
+        result = pd.concat(all_prices, ignore_index=True)
         logger.info("Retrieved %d bid price record(s).", len(result))
         return result
 
