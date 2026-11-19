@@ -6,7 +6,7 @@ Replicates Module 1 of wastedwind.energy:
 
 Usage:
     python main.py
-    # Future: python main.py 2026-11-19
+    # Future: python main.py 2026-11-18
 """
 
 import sys
