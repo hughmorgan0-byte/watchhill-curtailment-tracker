@@ -4,6 +4,7 @@ Entry point for the wasted-wind curtailment cost calculator.
 Replicates wastedwind.energy Modules 1 & 2:
     Module 1: Daily cost paid to curtail (switch off) wind turbines.
     Module 2: Cost of buying replacement energy (accepted offers, merit order).
+    Module 2B: NIV-Adjusted replacement offer cost (half-hourly, top-of-stack).
 
 Usage:
     python main.py
@@ -20,6 +21,8 @@ from wasted_wind_calc import (
     get_accepted_offer_volumes,
     get_accepted_offer_prices,
     calculate_replacement_offer_cost,
+    get_net_imbalance_volumes,
+    calculate_niv_adjusted_offer_cost,
 )
 
 # ---------------------------------------------------------------------------
@@ -39,7 +42,7 @@ TARGET_DATE = "2026-11-17"
 
 
 def main() -> None:
-    """Orchestrate Module 1 and Module 2 calculations and print summaries."""
+    """Orchestrate Module 1, Module 2, and Module 2B calculations."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     print(f"{'=' * 70}")
@@ -52,7 +55,6 @@ def main() -> None:
     print("[MODULE 1] Wind Curtailment Bid Cost")
     print(f"{'-' * 70}")
 
-    # Step 1 – Identify curtailed wind BMUs
     print("  [1/3] Fetching curtailed wind BMUs ...")
     acceptances = get_curtailed_wind_bmus(TARGET_DATE)
     if acceptances.empty:
@@ -60,7 +62,6 @@ def main() -> None:
         return
     print(f"  Found {acceptances['elexonBmUnit'].nunique()} wind BMU(s) with accepted bids.\n")
 
-    # Step 2 – Retrieve accepted bid prices
     print("  [2/3] Fetching accepted bid prices ...")
     bmu_ids = acceptances["elexonBmUnit"].unique().tolist()
     prices = get_accepted_bid_prices(TARGET_DATE, bmu_ids)
@@ -69,7 +70,6 @@ def main() -> None:
         return
     print(f"  Retrieved {len(prices)} price record(s).\n")
 
-    # Step 3 – Calculate daily cost
     print("  [3/3] Calculating daily wind bid cost ...")
     bid_results = calculate_daily_wind_bid_cost(acceptances, prices, target_date=TARGET_DATE)
 
@@ -131,7 +131,6 @@ def main() -> None:
     print(f"  MODULE 2 – Replacement Energy Cost (Accepted Offer Merit Order)")
     print(f"{'=' * 70}")
 
-    # Step 4 – Retrieve accepted offer volumes (all BMUs)
     print("  [1/3] Fetching accepted offer volumes (all BMUs) ...")
     offer_volumes = get_accepted_offer_volumes(TARGET_DATE)
     if offer_volumes.empty:
@@ -140,7 +139,6 @@ def main() -> None:
     print(f"  Found {offer_volumes['bmUnit'].nunique()} BMU(s) with accepted offers "
           f"({offer_volumes['offer_mwh'].sum():.1f} MWh total).\n")
 
-    # Step 5 – Retrieve accepted offer prices
     print("  [2/3] Fetching accepted offer prices ...")
     offer_bmu_ids = offer_volumes["bmUnit"].unique().tolist()
     offer_prices = get_accepted_offer_prices(TARGET_DATE, offer_bmu_ids)
@@ -156,10 +154,7 @@ def main() -> None:
         how="inner",
         suffixes=("", "_price"),
     )
-    # Rename the price column from the merge
-    if "price" in offer_stack.columns:
-        offer_stack = offer_stack.rename(columns={"price": "price"})
-    elif "price_price" in offer_stack.columns:
+    if "price" not in offer_stack.columns and "price_price" in offer_stack.columns:
         offer_stack = offer_stack.rename(columns={"price_price": "price"})
 
     if offer_stack.empty:
@@ -169,11 +164,9 @@ def main() -> None:
     print(f"  Offer stack: {len(offer_stack)} slices, "
           f"{offer_stack['offer_mwh'].sum():.1f} MWh total.\n")
 
-    # Step 6 – Calculate merit-order replacement cost
     print("  [3/3] Calculating merit-order replacement cost ...")
     module2 = calculate_replacement_offer_cost(bid_results, offer_stack)
 
-    # Print Module 2 results
     print(f"\n  MODULE 2 RESULTS")
     print(f"  {'-' * 40}")
     print(f"    Target curtailed wind (from Module 1) : {module2['target_mwh']:>10.1f} MWh")
@@ -184,7 +177,6 @@ def main() -> None:
     print(f"    Total replacement offer cost          : {module2['replacement_cost_gbp']:>12,.2f} £")
     print(f"    Volume-weighted avg offer price       : {module2['weighted_avg_price']:>10.2f} £/MWh")
 
-    # Fuel type breakdown
     fuel_bd = module2["fuel_breakdown"]
     if not fuel_bd.empty:
         print(f"\n  FUEL TYPE BREAKDOWN (Merit Order)")
@@ -196,7 +188,6 @@ def main() -> None:
                 f"{row['cost_gbp']:>14,.2f} {row['avg_price']:>8.2f}"
             )
 
-    # Top BMUs
     top = module2["top_bmus"]
     if not top.empty:
         print(f"\n  TOP 10 CONTRIBUTING OFFER BMUs")
@@ -212,19 +203,103 @@ def main() -> None:
             )
 
     # ==================================================================
-    # COMBINED HEADLINE TOTAL
+    # MODULE 2B – NIV-Adjusted Replacement Offer Cost
     # ==================================================================
-    combined_total = total_cost_all + module2["replacement_cost_gbp"]
+    print(f"\n{'=' * 70}")
+    print(f"  MODULE 2B – NIV-Adjusted Replacement Offer Cost")
+    print(f"  (Half-Hourly, Top-of-Stack)")
+    print(f"{'=' * 70}")
+
+    print("  [1/2] Fetching Net Imbalance Volumes (system prices) ...")
+    niv_by_period = get_net_imbalance_volumes(TARGET_DATE)
+    if not niv_by_period:
+        print("  No NIV data available. Skipping Module 2B.")
+        niv_result = None
+    else:
+        n_long = sum(1 for v in niv_by_period.values() if v < 0)
+        n_short = sum(1 for v in niv_by_period.values() if v >= 0)
+        print(f"  Retrieved NIV for {len(niv_by_period)} periods "
+              f"({n_long} long, {n_short} short/balanced).\n")
+
+        print("  [2/2] Calculating NIV-adjusted offer cost ...")
+        niv_result = calculate_niv_adjusted_offer_cost(
+            bid_records=acceptances,
+            offer_stack=offer_stack,
+            niv_by_period=niv_by_period,
+        )
+
+        print(f"\n  MODULE 2B RESULTS")
+        print(f"  {'-' * 40}")
+        print(f"    Total curtailed wind (Module 1)     : {niv_result['total_wind_curtailed_mwh']:>10.1f} MWh")
+        print(f"    Absorbed by long market (NIV < 0)   : {niv_result['total_long_market_offset_mwh']:>10.1f} MWh")
+        print(f"    Net constraint offer required       : {niv_result['total_niv_adjusted_offer_mwh']:>10.1f} MWh")
+        print(f"    Matched from accepted offers        : {niv_result['matched_offer_mwh']:>10.1f} MWh")
+        if niv_result["unmatched_shortfall_mwh"] > 0:
+            print(f"    *** UNMATCHED SHORTFALL               : {niv_result['unmatched_shortfall_mwh']:>10.1f} MWh ***")
+        print(f"    NIV-adjusted offer cost             : {niv_result['niv_adjusted_offer_cost_gbp']:>12,.2f} £")
+        print(f"    Volume-weighted avg offer price     : {niv_result['weighted_avg_offer_price']:>10.2f} £/MWh")
+
+        # Fuel breakdown for NIV-adjusted
+        fuel_bd_2b = niv_result["fuel_breakdown"]
+        if not fuel_bd_2b.empty:
+            print(f"\n  FUEL TYPE BREAKDOWN (NIV-Adjusted, Top-of-Stack)")
+            print(f"  {'Fuel':<12} {'MWh':>10} {'Cost £':>14} {'£/MWh':>8}")
+            print(f"  {'-' * 12} {'-' * 10} {'-' * 14} {'-' * 8}")
+            for _, row in fuel_bd_2b.iterrows():
+                print(
+                    f"  {row['fuelType']:<12} {row['mwh']:>10.1f} "
+                    f"{row['cost_gbp']:>14,.2f} {row['avg_price']:>8.2f}"
+                )
+
+        # Period detail (show periods where NIV had an effect)
+        period_detail = niv_result["period_detail"]
+        if not period_detail.empty:
+            affected = period_detail[period_detail["long_offset"] > 0]
+            if not affected.empty:
+                print(f"\n  PERIODS WHERE LONG MARKET ABSORBED WIND ({len(affected)} periods)")
+                print(f"  {'SP':>4} {'Wind MWh':>10} {'NIV MWh':>10} {'Offset':>10} {'Required':>10} {'Cost £':>12}")
+                print(f"  {'-' * 4} {'-' * 10} {'-' * 10} {'-' * 10} {'-' * 10} {'-' * 12}")
+                for _, row in affected.iterrows():
+                    print(
+                        f"  {int(row['settlementPeriod']):>4} {row['wind_mwh']:>10.1f} "
+                        f"{row['niv']:>10.1f} {row['long_offset']:>10.1f} "
+                        f"{row['required_mwh']:>10.1f} {row['cost_gbp']:>12,.2f}"
+                    )
+
+    # ==================================================================
+    # COMBINED HEADLINE TOTALS
+    # ==================================================================
+    unadjusted_total = total_cost_all + module2["replacement_cost_gbp"]
+
+    if niv_result is not None:
+        niv_adjusted_total = total_cost_all + niv_result["niv_adjusted_offer_cost_gbp"]
+    else:
+        niv_adjusted_total = None
 
     print(f"\n{'=' * 70}")
-    print(f"  COMBINED HEADLINE TOTAL  |  {TARGET_DATE}")
+    print(f"  COMBINED HEADLINE TOTALS  |  {TARGET_DATE}")
     print(f"{'=' * 70}")
     print(f"")
-    print(f"    Module 1 – Wind Bid Cost (curtailment)     : {total_cost_all:>14,.2f} £")
-    print(f"    Module 2 – Replacement Offer Cost (merit)  : {module2['replacement_cost_gbp']:>14,.2f} £")
-    print(f"    {'-' * 50}")
-    print(f"    TOTAL CONSTRAINT COST (Module 1 + 2)       : {combined_total:>14,.2f} £")
+    print(f"  1. UNADJUSTED BASELINE (wastedwind.energy methodology)")
+    print(f"  {'-' * 50}")
+    print(f"     Module 1 – Wind Bid Cost (curtailment)     : {total_cost_all:>14,.2f} £")
+    print(f"     Module 2 – Replacement Offer (merit order) : {module2['replacement_cost_gbp']:>14,.2f} £")
+    print(f"     {'-' * 50}")
+    print(f"     TOTAL (Module 1 + Module 2)                : {unadjusted_total:>14,.2f} £")
     print(f"")
+
+    if niv_adjusted_total is not None:
+        print(f"  2. NIV-ADJUSTED CONSTRAINT COST (Goal 2)")
+        print(f"  {'-' * 50}")
+        print(f"     Module 1 – Wind Bid Cost (curtailment)     : {total_cost_all:>14,.2f} £")
+        print(f"     Module 2B – NIV-Adj. Offer (top-of-stack)  : {niv_result['niv_adjusted_offer_cost_gbp']:>14,.2f} £")
+        print(f"     {'-' * 50}")
+        print(f"     TOTAL (Module 1 + Module 2B)               : {niv_adjusted_total:>14,.2f} £")
+        print(f"")
+        print(f"  DIFFERENCE (Unadjusted - NIV-Adjusted)       : {unadjusted_total - niv_adjusted_total:>14,.2f} £")
+        print(f"  (This is the portion of offers absorbed by long-market NIV)")
+        print(f"")
+
     print(f"  Compare against wastedwind.energy output for {TARGET_DATE}.")
     print(f"{'=' * 70}\n")
 

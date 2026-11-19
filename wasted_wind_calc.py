@@ -8,35 +8,35 @@ Module 1: Daily cost paid to curtail (switch off) wind turbines in the
 GB electricity market.
 
 Module 2: Cost of buying replacement energy (accepted offers) to replace
-the curtailed wind, calculated via merit-order stack.
+the curtailed wind, calculated via merit-order stack (cheapest first).
+
+Module 2B: NIV-Adjusted replacement offer cost. For each half-hour, if the
+market is long (NIV < 0), the market length absorbs part of the curtailed
+wind, reducing the constraint-related offer volume required. The remaining
+volume is matched against the top-of-stack (most expensive) offers for
+that period.
 
 Elexon BMRS API endpoints used
 ------------------------------
 - ``GET /reference/bmunits/all``
     Returns a JSON array of all Balancing Mechanism Units.
-    Key fields: ``elexonBmUnit``, ``nationalGridBmUnit``, ``bmUnitName``,
-    ``fuelType``, ``leadPartyName``, ``generationCapacity``, etc.
 
 - ``GET /balancing/settlement/acceptance/volumes/all/bid/{settlementDate}``
     Accepted bid volumes for a given settlement date.
-    Response: a JSON array. Each item has ``pairVolumes`` with
-    ``negative1``–``negative6`` (accepted bid volumes, negative MWh).
 
 - ``GET /balancing/settlement/acceptance/volumes/all/offer/{settlementDate}``
     Accepted offer volumes for a given settlement date.
-    Response: a JSON array. Each item has ``pairVolumes`` with
-    ``positive1``–``positive6`` (accepted offer volumes, positive MWh).
 
 - ``GET /datasets/BOD/stream?from=...&to=...``
     Bid-Offer Data (submitted bid/offer prices) – streaming endpoint.
-    Response: a raw JSON array ``[ ... ]``.
-    - ``pairId < 0`` → BID. Price in ``bid`` field.
-    - ``pairId > 0`` → OFFER. Price in ``offer`` field.
 
 - ``GET /datasets/BOALF/stream?from=...&to=...``
     Bid-Offer Acceptance Level Flagged – streaming endpoint.
-    - ``soFlag == True`` indicates a System Operator (constraint-related) action.
-    - ``acceptanceNumber`` corresponds to BOAV's ``acceptanceId``.
+
+- ``GET /balancing/settlement/system-prices/{settlementDate}``
+    System prices and net imbalance volumes per settlement period.
+    Response: a JSON array. Each item has ``settlementPeriod``,
+    ``netImbalanceVolume``, ``systemSellPrice``, ``systemBuyPrice``, etc.
 
 Sign convention (GB Balancing Mechanism cashflow)
 -------------------------------------------------
@@ -45,6 +45,7 @@ Sign convention (GB Balancing Mechanism cashflow)
 - BOD ``bid``/``offer`` price preserves its sign.
 - Bid cashflow: ``cost = volume × price`` (volume negative).
 - Offer cashflow: ``cost = volume × price`` (volume positive).
+- NIV: negative = market long (surplus), positive/zero = market short.
 """
 
 from __future__ import annotations
@@ -264,7 +265,6 @@ def _fetch_bod_stream(target_date: str) -> pd.DataFrame:
 
     Endpoint: ``GET {API_BASE}/datasets/BOD/stream``
     """
-    # Check cache first
     if target_date in _bod_cache:
         logger.info("BOD stream for %s served from cache.", target_date)
         return _bod_cache[target_date].copy()
@@ -308,7 +308,6 @@ def _fetch_bod_stream(target_date: str) -> pd.DataFrame:
 
     logger.info("BOD stream returned %d total record(s) for %s.", len(df), target_date)
 
-    # Cache the result
     _bod_cache[target_date] = df.copy()
     return df
 
@@ -706,17 +705,6 @@ def get_accepted_offer_volumes(target_date: str) -> pd.DataFrame:
     Queries ``/balancing/settlement/acceptance/volumes/all/offer/{target_date}``
     and extracts non-zero ``positive1`` through ``positive6`` values.
     Joins against the BMU reference for ``fuelType`` and ``bmUnitName``.
-
-    Parameters
-    ----------
-    target_date : str
-        Settlement date ``YYYY-MM-DD``.
-
-    Returns
-    -------
-    pd.DataFrame
-        Columns: ``bmUnit``, ``assetName``, ``fuelType``,
-        ``settlementPeriod``, ``pairId`` (+1..+6), ``offer_mwh`` (positive).
     """
     empty_result = pd.DataFrame(columns=[
         "bmUnit", "assetName", "fuelType",
@@ -724,7 +712,6 @@ def get_accepted_offer_volumes(target_date: str) -> pd.DataFrame:
     ])
 
     try:
-        # Fetch BMU reference for names and fuel types
         bmu_ref = _fetch_bmu_reference()
         name_map: dict[str, str] = {}
         fuel_map: dict[str, str] = {}
@@ -734,7 +721,6 @@ def get_accepted_offer_volumes(target_date: str) -> pd.DataFrame:
                 name_map[bmu_id] = row.get("bmUnitName", "Unknown")
                 fuel_map[bmu_id] = row.get("fuelType", "UNKNOWN")
 
-        # Fetch BOAV offer data
         time.sleep(API_CALL_DELAY)
         boav = _fetch_boav_offer(target_date)
         if boav.empty:
@@ -745,7 +731,6 @@ def get_accepted_offer_volumes(target_date: str) -> pd.DataFrame:
             logger.error("BOAV offer data missing 'bmUnit' column.")
             return empty_result
 
-        # Expand: one row per non-zero positive{N} pair volume
         rows: list[dict] = []
         for _, rec in boav.iterrows():
             bmu = rec["bmUnit"]
@@ -761,8 +746,8 @@ def get_accepted_offer_volumes(target_date: str) -> pd.DataFrame:
                         "assetName": name,
                         "fuelType": fuel,
                         "settlementPeriod": period,
-                        "pairId": n,  # positive pairId for offers
-                        "offer_mwh": float(vol),  # positive value
+                        "pairId": n,
+                        "offer_mwh": float(vol),
                     })
 
         if not rows:
@@ -787,24 +772,10 @@ def get_accepted_offer_prices(target_date: str, offer_bmu_ids: list[str]) -> pd.
 
     Reuses the cached BOD stream fetch (shared with Module 1).
     Filters to ``pairId > 0`` (offers) for the given BMU IDs.
-
-    Parameters
-    ----------
-    target_date : str
-        Settlement date ``YYYY-MM-DD``.
-    offer_bmu_ids : list[str]
-        BMU identifiers from :func:`get_accepted_offer_volumes`.
-
-    Returns
-    -------
-    pd.DataFrame
-        Columns: ``bmUnit``, ``settlementPeriod``, ``pairId``,
-        ``price`` (£/MWh, sign preserved).
     """
     empty_result = pd.DataFrame(columns=["bmUnit", "settlementPeriod", "pairId", "price"])
 
     try:
-        # BOD stream is cached – no additional API call if already fetched
         bod = _fetch_bod_stream(target_date)
         if bod.empty:
             logger.warning("BOD stream returned no data for %s.", target_date)
@@ -856,32 +827,7 @@ def calculate_replacement_offer_cost(
     Takes the total curtailed wind volume from Module 1 and walks down
     the sorted offer stack (cheapest first) to determine the cost of
     buying replacement energy.
-
-    Parameters
-    ----------
-    bid_results : pd.DataFrame
-        Output of :func:`calculate_daily_wind_bid_cost` (Module 1).
-        Used to extract the total curtailed wind MWh.
-    offer_stack : pd.DataFrame
-        Merged offer volumes + prices with columns:
-        ``bmUnit``, ``assetName``, ``fuelType``, ``settlementPeriod``,
-        ``pairId``, ``offer_mwh``, ``price``.
-
-    Returns
-    -------
-    dict
-        Keys:
-        - ``target_mwh``: total curtailed wind MWh from Module 1.
-        - ``matched_mwh``: MWh of offers matched (should equal target).
-        - ``replacement_cost_gbp``: total cost of replacement offers.
-        - ``weighted_avg_price``: volume-weighted average offer price.
-        - ``fuel_breakdown``: DataFrame with columns
-          ``fuelType``, ``mwh``, ``cost_gbp``, ``avg_price``.
-        - ``top_bmus``: DataFrame with top 10 contributing BMUs.
-        - ``total_offers_available``: total MWh of all accepted offers.
-        - ``shortfall``: True if total offers < target curtailed wind.
     """
-    # Extract target from Module 1
     target_mwh = float(bid_results["curtailed_mwh"].sum()) if not bid_results.empty else 0.0
 
     if offer_stack.empty or target_mwh <= 0:
@@ -897,7 +843,6 @@ def calculate_replacement_offer_cost(
             "shortfall": True,
         }
 
-    # Compute slice cost for each offer record
     offer_stack = offer_stack.copy()
     offer_stack["slice_cost"] = offer_stack["offer_mwh"] * offer_stack["price"]
 
@@ -911,10 +856,8 @@ def calculate_replacement_offer_cost(
             total_offers_available, target_mwh,
         )
 
-    # Sort by price ascending (merit order – cheapest first)
     offer_stack = offer_stack.sort_values("price", ascending=True).reset_index(drop=True)
 
-    # Walk down the stack, accumulating MWh until we hit the target
     cumulative_mwh = 0.0
     cumulative_cost = 0.0
     matched_rows: list[dict] = []
@@ -926,7 +869,6 @@ def calculate_replacement_offer_cost(
         remaining = target_mwh - cumulative_mwh
         allocated = min(row["offer_mwh"], remaining)
 
-        # Pro-rate the cost for the allocated portion
         if row["offer_mwh"] > 0:
             allocated_cost = allocated * row["price"]
         else:
@@ -953,7 +895,6 @@ def calculate_replacement_offer_cost(
     replacement_cost = float(matched_df["allocated_cost"].sum()) if not matched_df.empty else 0.0
     weighted_avg = replacement_cost / matched_mwh if matched_mwh > 0 else 0.0
 
-    # Fuel type breakdown
     fuel_breakdown = pd.DataFrame(columns=["fuelType", "mwh", "cost_gbp", "avg_price"])
     if not matched_df.empty:
         fuel_breakdown = (
@@ -969,7 +910,6 @@ def calculate_replacement_offer_cost(
         ).fillna(0.0)
         fuel_breakdown = fuel_breakdown.sort_values("cost_gbp", ascending=False).reset_index(drop=True)
 
-    # Top BMUs
     top_bmus = pd.DataFrame(columns=["bmUnit", "assetName", "fuelType", "mwh", "cost_gbp"])
     if not matched_df.empty:
         top_bmus = (
@@ -999,4 +939,303 @@ def calculate_replacement_offer_cost(
         "top_bmus": top_bmus,
         "total_offers_available": total_offers_available,
         "shortfall": shortfall,
+    }
+
+
+# ---------------------------------------------------------------------------
+# MODULE 2B – NIV-Adjusted Replacement Offer Cost (Half-Hourly, Top-of-Stack)
+# ---------------------------------------------------------------------------
+def get_net_imbalance_volumes(target_date: str) -> dict[int, float]:
+    """
+    Function 7: Retrieve Net Imbalance Volume (NIV) per settlement period.
+
+    Queries ``GET {API_BASE}/balancing/settlement/system-prices/{target_date}``
+    and extracts ``settlementPeriod`` and ``netImbalanceVolume`` for each
+    half-hour. If multiple rows exist for the same period (e.g. multiple
+    runs), keeps the latest by ``createdDateTime``.
+
+    Sign convention:
+    - ``netImbalanceVolume < 0`` → market is LONG (surplus).
+    - ``netImbalanceVolume >= 0`` → market is SHORT or balanced.
+
+    Parameters
+    ----------
+    target_date : str
+        Settlement date ``YYYY-MM-DD``.
+
+    Returns
+    -------
+    dict[int, float]
+        Mapping of ``settlementPeriod`` (1-48) to ``netImbalanceVolume`` (MWh).
+        Empty dict if no data available.
+    """
+    url = f"{API_BASE}/balancing/settlement/system-prices/{target_date}"
+    logger.info("Fetching system prices / NIV for %s", target_date)
+
+    try:
+        resp = _get_with_retry(url)
+        payload = resp.json()
+
+        if isinstance(payload, dict):
+            records = payload.get("data", [])
+        elif isinstance(payload, list):
+            records = payload
+        else:
+            records = []
+
+        if not records:
+            logger.warning("System prices returned no data for %s.", target_date)
+            return {}
+
+        # Deduplicate by settlementPeriod, keeping the latest createdDateTime
+        best: dict[int, tuple[str, float]] = {}
+        for rec in records:
+            sp = rec.get("settlementPeriod")
+            niv = rec.get("netImbalanceVolume")
+            created = rec.get("createdDateTime", "")
+            if sp is None or niv is None:
+                continue
+            sp = int(sp)
+            niv = float(niv)
+            if sp not in best or created > best[sp][0]:
+                best[sp] = (created, niv)
+
+        result = {sp: niv for sp, (_, niv) in best.items()}
+        logger.info(
+            "NIV: %d periods | long periods: %d | short/balanced: %d",
+            len(result),
+            sum(1 for v in result.values() if v < 0),
+            sum(1 for v in result.values() if v >= 0),
+        )
+        return result
+
+    except (requests.exceptions.RequestException, ValueError) as exc:
+        logger.warning("Could not fetch NIV data: %s", exc)
+        return {}
+
+
+def calculate_niv_adjusted_offer_cost(
+    bid_records: pd.DataFrame,
+    offer_stack: pd.DataFrame,
+    niv_by_period: dict[int, float],
+) -> dict:
+    """
+    Function 8: NIV-Adjusted half-hourly replacement offer cost (Module 2B).
+
+    For each settlement period:
+    - If NIV < 0 (market long): the market length absorbs part of the
+      curtailed wind, reducing the constraint-related offer volume needed.
+      ``required = max(0, wind_curtailed - abs(niv))``
+    - If NIV >= 0 (market short/balanced): all curtailed wind needs
+      replacement. ``required = wind_curtailed``
+    - Sort that period's offer slices DESCENDING by price (most expensive
+      first – top-of-stack attribution to constraint).
+    - Walk down until cumulative MWh reaches the required volume.
+
+    Parameters
+    ----------
+    bid_records : pd.DataFrame
+        Module 1 acceptances with columns: ``elexonBmUnit``,
+        ``settlementPeriod``, ``acceptedVolumeMWh`` (negative).
+    offer_stack : pd.DataFrame
+        Merged offer volumes + prices with columns: ``bmUnit``,
+        ``assetName``, ``fuelType``, ``settlementPeriod``, ``pairId``,
+        ``offer_mwh``, ``price``.
+    niv_by_period : dict[int, float]
+        Mapping of settlement period to NIV (MWh). Negative = long.
+
+    Returns
+    -------
+    dict
+        Keys:
+        - ``total_wind_curtailed_mwh``
+        - ``total_long_market_offset_mwh``
+        - ``total_niv_adjusted_offer_mwh``
+        - ``matched_offer_mwh``
+        - ``unmatched_shortfall_mwh``
+        - ``niv_adjusted_offer_cost_gbp``
+        - ``weighted_avg_offer_price``
+        - ``fuel_breakdown``: DataFrame
+        - ``period_detail``: DataFrame (per-period breakdown)
+    """
+    empty_result = {
+        "total_wind_curtailed_mwh": 0.0,
+        "total_long_market_offset_mwh": 0.0,
+        "total_niv_adjusted_offer_mwh": 0.0,
+        "matched_offer_mwh": 0.0,
+        "unmatched_shortfall_mwh": 0.0,
+        "niv_adjusted_offer_cost_gbp": 0.0,
+        "weighted_avg_offer_price": 0.0,
+        "fuel_breakdown": pd.DataFrame(columns=["fuelType", "mwh", "cost_gbp", "avg_price"]),
+        "period_detail": pd.DataFrame(columns=[
+            "settlementPeriod", "wind_mwh", "niv", "long_offset",
+            "required_mwh", "matched_mwh", "shortfall_mwh", "cost_gbp",
+        ]),
+    }
+
+    if bid_records.empty or offer_stack.empty:
+        logger.warning("NIV-adjusted: empty input data.")
+        return empty_result
+
+    # Group wind curtailed MWh by settlement period (absolute value)
+    bid_records = bid_records.copy()
+    bid_records["curtailed_mwh"] = bid_records["acceptedVolumeMWh"].abs()
+    wind_by_period = bid_records.groupby("settlementPeriod")["curtailed_mwh"].sum().to_dict()
+
+    # Deduplicate offer stack on (bmUnit, settlementPeriod, pairId) keeping first
+    offer_stack = offer_stack.copy()
+    offer_stack = offer_stack.drop_duplicates(
+        subset=["bmUnit", "settlementPeriod", "pairId"], keep="first"
+    ).reset_index(drop=True)
+
+    # Group offers by settlement period
+    offers_by_period: dict[int, pd.DataFrame] = {}
+    for sp, group in offer_stack.groupby("settlementPeriod"):
+        offers_by_period[int(sp)] = group
+
+    # Walk through each settlement period
+    total_wind = 0.0
+    total_long_offset = 0.0
+    total_required = 0.0
+    total_matched = 0.0
+    total_shortfall = 0.0
+    total_cost = 0.0
+    period_rows: list[dict] = []
+    all_matched_slices: list[dict] = []
+
+    for sp in range(1, SETTLEMENT_PERIODS + 1):
+        wind_mwh = wind_by_period.get(sp, 0.0)
+        if wind_mwh <= 0:
+            continue
+
+        total_wind += wind_mwh
+        niv = niv_by_period.get(sp, 0.0)
+
+        if niv < 0:
+            long_offset = min(abs(niv), wind_mwh)
+            required = max(0.0, wind_mwh - abs(niv))
+        else:
+            long_offset = 0.0
+            required = wind_mwh
+
+        total_long_offset += long_offset
+        total_required += required
+
+        if required <= 0:
+            period_rows.append({
+                "settlementPeriod": sp,
+                "wind_mwh": wind_mwh,
+                "niv": niv,
+                "long_offset": long_offset,
+                "required_mwh": 0.0,
+                "matched_mwh": 0.0,
+                "shortfall_mwh": 0.0,
+                "cost_gbp": 0.0,
+            })
+            continue
+
+        # Get offers for this period, sort DESCENDING by price (top-of-stack)
+        period_offers = offers_by_period.get(sp, pd.DataFrame())
+        if period_offers.empty:
+            total_shortfall += required
+            period_rows.append({
+                "settlementPeriod": sp,
+                "wind_mwh": wind_mwh,
+                "niv": niv,
+                "long_offset": long_offset,
+                "required_mwh": required,
+                "matched_mwh": 0.0,
+                "shortfall_mwh": required,
+                "cost_gbp": 0.0,
+            })
+            continue
+
+        period_offers = period_offers.sort_values("price", ascending=False).reset_index(drop=True)
+
+        # Walk down the top-of-stack
+        cumulative = 0.0
+        period_cost = 0.0
+        period_matched = 0.0
+
+        for _, row in period_offers.iterrows():
+            if cumulative >= required:
+                break
+
+            remaining = required - cumulative
+            allocated = min(row["offer_mwh"], remaining)
+            allocated_cost = allocated * row["price"]
+
+            cumulative += allocated
+            period_cost += allocated_cost
+            period_matched += allocated
+
+            all_matched_slices.append({
+                "bmUnit": row["bmUnit"],
+                "assetName": row.get("assetName", "Unknown"),
+                "fuelType": row.get("fuelType", "UNKNOWN"),
+                "settlementPeriod": sp,
+                "pairId": row["pairId"],
+                "allocated_mwh": allocated,
+                "price": row["price"],
+                "allocated_cost": allocated_cost,
+            })
+
+        period_shortfall = max(0.0, required - cumulative)
+        total_matched += period_matched
+        total_shortfall += period_shortfall
+        total_cost += period_cost
+
+        period_rows.append({
+            "settlementPeriod": sp,
+            "wind_mwh": wind_mwh,
+            "niv": niv,
+            "long_offset": long_offset,
+            "required_mwh": required,
+            "matched_mwh": period_matched,
+            "shortfall_mwh": period_shortfall,
+            "cost_gbp": period_cost,
+        })
+
+    # Build fuel breakdown
+    fuel_breakdown = pd.DataFrame(columns=["fuelType", "mwh", "cost_gbp", "avg_price"])
+    if all_matched_slices:
+        slices_df = pd.DataFrame(all_matched_slices)
+        fuel_breakdown = (
+            slices_df
+            .groupby("fuelType", as_index=False)
+            .agg(
+                mwh=("allocated_mwh", "sum"),
+                cost_gbp=("allocated_cost", "sum"),
+            )
+        )
+        fuel_breakdown["avg_price"] = (
+            fuel_breakdown["cost_gbp"] / fuel_breakdown["mwh"].replace(0, pd.NA)
+        ).fillna(0.0)
+        fuel_breakdown = fuel_breakdown.sort_values("cost_gbp", ascending=False).reset_index(drop=True)
+
+    period_detail = pd.DataFrame(period_rows) if period_rows else pd.DataFrame(columns=[
+        "settlementPeriod", "wind_mwh", "niv", "long_offset",
+        "required_mwh", "matched_mwh", "shortfall_mwh", "cost_gbp",
+    ])
+
+    weighted_avg = total_cost / total_matched if total_matched > 0 else 0.0
+
+    logger.info(
+        "MODULE 2B – Wind: %.1f MWh | Long offset: %.1f MWh | "
+        "Required: %.1f MWh | Matched: %.1f MWh | Shortfall: %.1f MWh | "
+        "Cost: £%.2f | Avg: £%.2f/MWh",
+        total_wind, total_long_offset, total_required,
+        total_matched, total_shortfall, total_cost, weighted_avg,
+    )
+
+    return {
+        "total_wind_curtailed_mwh": total_wind,
+        "total_long_market_offset_mwh": total_long_offset,
+        "total_niv_adjusted_offer_mwh": total_required,
+        "matched_offer_mwh": total_matched,
+        "unmatched_shortfall_mwh": total_shortfall,
+        "niv_adjusted_offer_cost_gbp": total_cost,
+        "weighted_avg_offer_price": weighted_avg,
+        "fuel_breakdown": fuel_breakdown,
+        "period_detail": period_detail,
     }
