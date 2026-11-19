@@ -6,10 +6,11 @@ Replicates Module 1 of wastedwind.energy:
 
 Usage:
     python main.py
-    # Future: python main.py 2026-11-18
+    # Future: python main.py 2026-11-19
 """
 
 import sys
+import logging
 
 from wasted_wind_calc import (
     get_curtailed_wind_bmus,
@@ -35,6 +36,8 @@ TARGET_DATE = "2026-11-19"
 
 def main() -> None:
     """Orchestrate the three-step calculation and print a summary table."""
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
     print(f"{'=' * 70}")
     print(f"  Wasted Wind Curtailment Cost Calculator  |  {TARGET_DATE}")
     print(f"{'=' * 70}\n")
@@ -74,7 +77,9 @@ def main() -> None:
     print(f"  {'-' * 22} {'-' * 30} {'-' * 8} {'-' * 8} {'-' * 12}")
 
     for _, row in results.iterrows():
-        name = row["bmUnitName"][:28] if len(str(row["bmUnitName"])) > 28 else str(row["bmUnitName"])
+        name = str(row["bmUnitName"])
+        if len(name) > 28:
+            name = name[:26] + "…"
         print(
             f"  {row['elexonBmUnit']:<22} {name:<30} "
             f"{row['curtailed_mwh']:>8.1f} {row['avg_price']:>8.2f} {row['total_cost']:>12.2f}"
