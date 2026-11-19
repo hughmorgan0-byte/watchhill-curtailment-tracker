@@ -68,34 +68,67 @@ def main() -> None:
         return
 
     # ------------------------------------------------------------------
-    # Print summary
+    # Print per-BMU summary table
     # ------------------------------------------------------------------
     print(f"\n{'=' * 70}")
-    print(f"  SUMMARY – Wind Curtailment Bids  |  {TARGET_DATE}")
+    print(f"  PER-BMU SUMMARY – Wind Curtailment Bids  |  {TARGET_DATE}")
     print(f"{'=' * 70}")
-    print(f"  {'BMU ID':<22} {'Name':<30} {'MWh':>8} {'£/MWh':>8} {'Cost £':>12}")
-    print(f"  {'-' * 22} {'-' * 30} {'-' * 8} {'-' * 8} {'-' * 12}")
+    print(f"  {'BMU ID':<22} {'Name':<30} {'MWh':>8} {'£/MWh':>8} {'Cost £':>12} {'SO':>4}")
+    print(f"  {'-' * 22} {'-' * 30} {'-' * 8} {'-' * 8} {'-' * 12} {'-' * 4}")
 
     for _, row in results.iterrows():
         name = str(row["bmUnitName"])
         if len(name) > 28:
             name = name[:26] + "…"
+        so = "Y" if row.get("is_system_flag", False) else ""
         print(
             f"  {row['elexonBmUnit']:<22} {name:<30} "
-            f"{row['curtailed_mwh']:>8.1f} {row['avg_price']:>8.2f} {row['total_cost']:>12.2f}"
+            f"{row['curtailed_mwh']:>8.1f} {row['avg_price']:>8.2f} "
+            f"{row['total_cost']:>12.2f} {so:>4}"
         )
 
-    total_mwh = results["curtailed_mwh"].sum()
-    total_cost = results["total_cost"].sum()
-    overall_avg = total_cost / total_mwh if total_mwh > 0 else 0.0
+    # ------------------------------------------------------------------
+    # Print both summary blocks
+    # ------------------------------------------------------------------
+    total_mwh_all = results["curtailed_mwh"].sum()
+    total_cost_all = results["total_cost"].sum()
+    avg_price_all = total_cost_all / total_mwh_all if total_mwh_all > 0 else 0.0
 
-    print(f"  {'-' * 22} {'-' * 30} {'-' * 8} {'-' * 8} {'-' * 12}")
-    print(
-        f"  {'TOTAL':<22} {'':<30} "
-        f"{total_mwh:>8.1f} {overall_avg:>8.2f} {total_cost:>12.2f}"
-    )
-    print(f"\n  Total curtailed wind energy : {total_mwh:.1f} MWh")
-    print(f"  Total wind bid cost         : £{total_cost:,.2f}")
+    sys_mask = results["is_system_flag"] == True  # noqa: E712
+    total_mwh_sys = results.loc[sys_mask, "curtailed_mwh"].sum()
+    total_cost_sys = results.loc[sys_mask, "total_cost"].sum()
+    avg_price_sys = total_cost_sys / total_mwh_sys if total_mwh_sys > 0 else 0.0
+
+    total_mwh_non = total_mwh_all - total_mwh_sys
+    total_cost_non = total_cost_all - total_cost_sys
+    avg_price_non = total_cost_non / total_mwh_non if total_mwh_non > 0 else 0.0
+
+    print(f"\n{'=' * 70}")
+    print(f"  DAILY TOTALS  |  {TARGET_DATE}")
+    print(f"{'=' * 70}")
+    print(f"")
+    print(f"  ALL ACCEPTED WIND BIDS")
+    print(f"  {'-' * 40}")
+    print(f"    Total curtailed wind energy : {total_mwh_all:>10.1f} MWh")
+    print(f"    Volume-weighted avg price   : {avg_price_all:>10.2f} £/MWh")
+    print(f"    Total wind bid cost         : {total_cost_all:>12,.2f} £")
+    print(f"")
+    print(f"  SYSTEM / CONSTRAINT-RELATED (soFlag = True)")
+    print(f"  {'-' * 40}")
+    print(f"    Total curtailed wind energy : {total_mwh_sys:>10.1f} MWh")
+    print(f"    Volume-weighted avg price   : {avg_price_sys:>10.2f} £/MWh")
+    print(f"    Total wind bid cost         : {total_cost_sys:>12,.2f} £")
+    print(f"")
+    print(f"  NON-SYSTEM / ENERGY BALANCING (soFlag = False)")
+    print(f"  {'-' * 40}")
+    print(f"    Total curtailed wind energy : {total_mwh_non:>10.1f} MWh")
+    print(f"    Volume-weighted avg price   : {avg_price_non:>10.2f} £/MWh")
+    print(f"    Total wind bid cost         : {total_cost_non:>12,.2f} £")
+    print(f"")
+    print(f"{'=' * 70}")
+    print(f"  NOTE: 'System' bids (soFlag=True) are constraint-related actions")
+    print(f"  by NESO. 'Non-system' bids are energy-balancing actions.")
+    print(f"  Compare 'System' total against wastedwind.energy output.")
     print(f"{'=' * 70}\n")
 
 

@@ -43,13 +43,24 @@ Elexon BMRS API endpoints used
     - ``pairId < 0`` → BID (reduction).  Price in ``bid`` field.
     - ``pairId > 0`` → OFFER (increase).  Price in ``offer`` field.
 
+- ``GET /datasets/BOALF/stream?from=...&to=...``
+    Bid-Offer Acceptance Level Flagged – streaming endpoint.
+    Query params: ``from`` (RFC 3339 date-time, required),
+                  ``to``   (RFC 3339 date-time, required).
+    Response: a raw JSON array ``[ ... ]``.
+    Each item has:
+    ``dataset``, ``settlementDate``, ``settlementPeriodFrom``,
+    ``settlementPeriodTo``, ``timeFrom``, ``timeTo``, ``levelFrom``,
+    ``levelTo``, ``acceptanceNumber``, ``acceptanceTime``,
+    ``deemedBoFlag``, ``soFlag``, ``amendmentFlag``, ``storFlag``,
+    ``rrFlag``, ``nationalGridBmUnit``, ``bmUnit``.
+
+    - ``soFlag == True`` indicates a System Operator (constraint-related) action.
+    - ``acceptanceNumber`` corresponds to BOAV's ``acceptanceId``.
+
 - ``GET /datasets/EBOCF?from=...&to=...``
     Elexon's official Indicative Period BMU Cashflows.
     Used for cross-checking our calculated totals.
-    Response: ``{"data": [ ... ]}`` where each item has:
-    ``settlementDate``, ``settlementPeriod``, ``startTime``,
-    ``bmUnit``, ``bmUnitType``, ``leadPartyName``,
-    ``nationalGridBmUnit``, ``bidOfferPairCashflows``, ``totalCashflow``.
 
 Sign convention (GB Balancing Mechanism cashflow)
 -------------------------------------------------
@@ -63,8 +74,6 @@ Sign convention (GB Balancing Mechanism cashflow)
   - ``-12.5 × -85 = +£1062.50``  → wind farm pays NESO (saving to system).
   - ``-12.5 × +20 = -£250.00``   → NESO pays wind farm (cost to system).
 - For reporting: ``curtailed_mwh = abs(volume)`` (always positive).
-- EBOCF cross-check: our ``volume × price`` should match EBOCF
-  ``bidOfferPairCashflows.negative{N}`` for the same BMU/period/pair.
 """
 
 from __future__ import annotations
@@ -350,6 +359,88 @@ def _fetch_bod_stream(target_date: str) -> pd.DataFrame:
     return df
 
 
+def _fetch_boalf_stream(target_date: str) -> pd.DataFrame:
+    """
+    Fetch Bid-Offer Acceptance Level Flagged (BOALF) data for a given
+    settlement date using the streaming endpoint.
+
+    Endpoint: ``GET {API_BASE}/datasets/BOALF/stream``
+    Parameters:
+        - ``from``: RFC 3339 date-time (start of settlement day)
+        - ``to``:   RFC 3339 date-time (end of settlement day)
+
+    Response: a raw JSON array ``[ ... ]``.
+    Each item has:
+    ``dataset``, ``settlementDate``, ``settlementPeriodFrom``,
+    ``settlementPeriodTo``, ``timeFrom``, ``timeTo``, ``levelFrom``,
+    ``levelTo``, ``acceptanceNumber``, ``acceptanceTime``,
+    ``deemedBoFlag``, ``soFlag``, ``amendmentFlag``, ``storFlag``,
+    ``rrFlag``, ``nationalGridBmUnit``, ``bmUnit``.
+
+    Parameters
+    ----------
+    target_date : str
+        Settlement date in ``YYYY-MM-DD`` format.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``settlementDate``, ``settlementPeriodFrom``,
+        ``settlementPeriodTo``, ``levelFrom``, ``levelTo``,
+        ``acceptanceNumber``, ``soFlag``, ``deemedBoFlag``,
+        ``bmUnit``, ``nationalGridBmUnit``, etc.
+        Empty DataFrame if no data returned.
+    """
+    url = f"{API_BASE}/datasets/BOALF/stream"
+
+    dt = datetime.strptime(target_date, "%Y-%m-%d")
+    next_dt = dt + timedelta(days=1)
+    from_str = dt.strftime("%Y-%m-%dT00:00Z")
+    to_str = next_dt.strftime("%Y-%m-%dT00:00Z")
+
+    params: dict = {
+        "from": from_str,
+        "to": to_str,
+    }
+
+    logger.info("Fetching BOALF stream for %s", target_date)
+    resp = _get_with_retry(url, params=params)
+    payload = resp.json()
+
+    # The /stream endpoint returns a raw JSON array directly
+    if isinstance(payload, list):
+        records = payload
+    elif isinstance(payload, dict):
+        records = payload.get("data", [])
+    else:
+        records = []
+
+    if not records:
+        logger.warning("BOALF stream returned no data for %s.", target_date)
+        return pd.DataFrame()
+
+    df = pd.DataFrame(records)
+
+    # Ensure numeric types
+    for col in ("settlementPeriodFrom", "settlementPeriodTo",
+                "levelFrom", "levelTo", "acceptanceNumber"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Ensure boolean types
+    for col in ("soFlag", "deemedBoFlag", "storFlag", "rrFlag"):
+        if col in df.columns:
+            df[col] = df[col].astype(bool)
+
+    # Ensure string types
+    for col in ("bmUnit", "nationalGridBmUnit", "settlementDate"):
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip()
+
+    logger.info("BOALF stream returned %d record(s) for %s.", len(df), target_date)
+    return df
+
+
 def _fetch_ebocf(target_date: str, bmu_ids: Optional[list[str]] = None) -> pd.DataFrame:
     """
     Fetch Elexon's official Indicative Period BMU Cashflows (EBOCF) for cross-checking.
@@ -454,6 +545,8 @@ def get_curtailed_wind_bmus(target_date: str) -> pd.DataFrame:
     4. Only include records where at least one ``negative{N}`` is non-zero.
        Do NOT include ``positive{N}`` (offers/turn-ups).
     5. Expand into one row per non-zero negative pair volume.
+    6. Fetch BOALF and tag each record with ``is_system_flag`` based on
+       ``soFlag`` (matching ``acceptanceId`` to ``acceptanceNumber``).
 
     Parameters
     ----------
@@ -465,11 +558,11 @@ def get_curtailed_wind_bmus(target_date: str) -> pd.DataFrame:
     pd.DataFrame
         Columns: ``elexonBmUnit``, ``bmUnitName``, ``settlementPeriod``,
         ``pairId`` (negative, e.g. -1, -2), ``acceptedVolumeMWh``
-        (negative value, e.g. -12.5).
+        (negative value, e.g. -12.5), ``is_system_flag`` (bool).
     """
     empty_result = pd.DataFrame(columns=[
         "elexonBmUnit", "bmUnitName", "settlementPeriod",
-        "pairId", "acceptedVolumeMWh",
+        "pairId", "acceptedVolumeMWh", "is_system_flag",
     ])
 
     try:
@@ -526,6 +619,7 @@ def get_curtailed_wind_bmus(target_date: str) -> pd.DataFrame:
             bmu = rec["bmUnit"]
             period = int(rec["settlementPeriod"])
             name = name_map.get(bmu, "Unknown")
+            acceptance_id = rec.get("acceptanceId")
 
             for n in range(1, 7):
                 vol = rec.get(f"negative{n}")
@@ -536,6 +630,7 @@ def get_curtailed_wind_bmus(target_date: str) -> pd.DataFrame:
                         "settlementPeriod": period,
                         "pairId": -n,
                         "acceptedVolumeMWh": float(vol),  # negative value
+                        "acceptanceId": acceptance_id,
                     })
 
         if not rows:
@@ -543,6 +638,48 @@ def get_curtailed_wind_bmus(target_date: str) -> pd.DataFrame:
             return empty_result
 
         result = pd.DataFrame(rows)
+
+        # 5 – Fetch BOALF and tag with soFlag
+        time.sleep(API_CALL_DELAY)
+        boalf = _fetch_boalf_stream(target_date)
+
+        if not boalf.empty and "acceptanceNumber" in boalf.columns and "soFlag" in boalf.columns:
+            # Build a set of (bmUnit, acceptanceNumber) where soFlag is True
+            system_flags = set()
+            for _, boalf_row in boalf.iterrows():
+                if boalf_row.get("soFlag") is True:
+                    bmu_key = str(boalf_row.get("bmUnit", "")).strip()
+                    acc_num = boalf_row.get("acceptanceNumber")
+                    if bmu_key and acc_num is not None and not pd.isna(acc_num):
+                        system_flags.add((bmu_key, int(acc_num)))
+
+            # Tag each row
+            is_system = []
+            for _, row in result.iterrows():
+                bmu = row["elexonBmUnit"]
+                acc_id = row.get("acceptanceId")
+                if acc_id is not None and not pd.isna(acc_id):
+                    is_system.append((bmu, int(acc_id)) in system_flags)
+                else:
+                    is_system.append(False)
+
+            result["is_system_flag"] = is_system
+            n_system = sum(is_system)
+            logger.info(
+                "BOALF soFlag: %d/%d records are system-related (soFlag=True).",
+                n_system, len(result),
+            )
+        else:
+            # BOALF unavailable – default all to False
+            result["is_system_flag"] = False
+            logger.warning(
+                "BOALF data unavailable or missing soFlag/acceptanceNumber. "
+                "Defaulting all records to is_system_flag=False."
+            )
+
+        # Drop the temporary acceptanceId column
+        result = result.drop(columns=["acceptanceId"], errors="ignore")
+
         logger.info("Identified %d accepted bid record(s) across %d BMU(s).",
                     len(result), result["elexonBmUnit"].nunique())
         return result
@@ -651,16 +788,17 @@ def calculate_daily_wind_bid_cost(
       - ``-12.5 × +20.0 = -£250.00``  → NESO pays wind farm (cost to system).
     - ``curtailed_mwh = abs(acceptedVolumeMWh)`` (always positive, for reporting).
 
-    Cross-check:
-    - EBOCF ``bidOfferPairCashflows.negative{N}`` should equal our
-      ``acceptedVolumeMWh × bid_price`` for the same BMU/period/pair.
+    The function computes two summary blocks:
+    - **All Accepted Wind Bids:** total MWh, avg £/MWh, total cost.
+    - **System-Related (soFlag=True):** total MWh, avg £/MWh, total cost.
+    - **Non-System (energy balancing):** the remainder.
 
     Parameters
     ----------
     acceptances : pd.DataFrame
         Output of :func:`get_curtailed_wind_bmus`.
         Must contain: ``elexonBmUnit``, ``settlementPeriod``, ``pairId``,
-        ``acceptedVolumeMWh`` (negative), ``bmUnitName``.
+        ``acceptedVolumeMWh`` (negative), ``bmUnitName``, ``is_system_flag``.
     prices : pd.DataFrame
         Output of :func:`get_accepted_bid_prices`.
         Must contain: ``elexonBmUnit``, ``settlementPeriod``, ``pairId``,
@@ -673,9 +811,10 @@ def calculate_daily_wind_bid_cost(
     pd.DataFrame
         One row per BMU with columns:
         ``elexonBmUnit``, ``bmUnitName``, ``curtailed_mwh``,
-        ``avg_price``, ``total_cost``.
+        ``avg_price``, ``total_cost``, ``is_system_flag``.
     """
-    empty_cols = ["elexonBmUnit", "bmUnitName", "curtailed_mwh", "avg_price", "total_cost"]
+    empty_cols = ["elexonBmUnit", "bmUnitName", "curtailed_mwh",
+                  "avg_price", "total_cost", "is_system_flag"]
     if acceptances.empty or prices.empty:
         logger.warning("Empty input data – returning empty result.")
         return pd.DataFrame(columns=empty_cols)
@@ -685,6 +824,10 @@ def calculate_daily_wind_bid_cost(
         df["elexonBmUnit"] = df["elexonBmUnit"].astype(str).str.strip()
         df["settlementPeriod"] = pd.to_numeric(df["settlementPeriod"], errors="coerce").astype(int)
         df["pairId"] = pd.to_numeric(df["pairId"], errors="coerce").astype(int)
+
+    # Ensure is_system_flag exists
+    if "is_system_flag" not in acceptances.columns:
+        acceptances["is_system_flag"] = False
 
     # Merge on the three key columns
     merged = acceptances.merge(
@@ -714,7 +857,7 @@ def calculate_daily_wind_bid_cost(
     # Aggregate per BMU
     summary = (
         merged
-        .groupby(["elexonBmUnit", "bmUnitName"], as_index=False)
+        .groupby(["elexonBmUnit", "bmUnitName", "is_system_flag"], as_index=False)
         .agg(
             curtailed_mwh=("curtailed_mwh", "sum"),
             total_cost=("cost_gbp", "sum"),
@@ -726,11 +869,33 @@ def calculate_daily_wind_bid_cost(
     # Sort by total cost descending for the summary table
     summary = summary.sort_values("total_cost", ascending=False).reset_index(drop=True)
 
-    total_mwh = summary["curtailed_mwh"].sum()
-    total_cost = summary["total_cost"].sum()
+    # ------------------------------------------------------------------
+    # Log both summary blocks
+    # ------------------------------------------------------------------
+    total_mwh_all = summary["curtailed_mwh"].sum()
+    total_cost_all = summary["total_cost"].sum()
+    avg_price_all = total_cost_all / total_mwh_all if total_mwh_all > 0 else 0.0
+
+    sys_mask = summary["is_system_flag"] == True  # noqa: E712
+    total_mwh_sys = summary.loc[sys_mask, "curtailed_mwh"].sum()
+    total_cost_sys = summary.loc[sys_mask, "total_cost"].sum()
+    avg_price_sys = total_cost_sys / total_mwh_sys if total_mwh_sys > 0 else 0.0
+
+    total_mwh_non = total_mwh_all - total_mwh_sys
+    total_cost_non = total_cost_all - total_cost_sys
+    avg_price_non = total_cost_non / total_mwh_non if total_mwh_non > 0 else 0.0
+
     logger.info(
-        "Daily totals – %d BMU(s), %.1f MWh curtailed, £%.2f total cost.",
-        len(summary), total_mwh, total_cost,
+        "ALL WIND BIDS – %d BMU(s), %.1f MWh, avg £%.2f/MWh, total £%.2f",
+        summary["elexonBmUnit"].nunique(), total_mwh_all, avg_price_all, total_cost_all,
+    )
+    logger.info(
+        "SYSTEM (soFlag=True) – %.1f MWh, avg £%.2f/MWh, total £%.2f",
+        total_mwh_sys, avg_price_sys, total_cost_sys,
+    )
+    logger.info(
+        "NON-SYSTEM (energy) – %.1f MWh, avg £%.2f/MWh, total £%.2f",
+        total_mwh_non, avg_price_non, total_cost_non,
     )
 
     # ------------------------------------------------------------------
@@ -746,7 +911,7 @@ def calculate_daily_wind_bid_cost(
                 ebocf_total = pd.to_numeric(ebocf["totalCashflow"], errors="coerce").sum()
                 logger.info(
                     "EBOCF cross-check – our total: £%.2f | EBOCF total: £%.2f | diff: £%.2f",
-                    total_cost, ebocf_total, total_cost - ebocf_total,
+                    total_cost_all, ebocf_total, total_cost_all - ebocf_total,
                 )
         except Exception as exc:
             logger.debug("EBOCF cross-check skipped: %s", exc)
