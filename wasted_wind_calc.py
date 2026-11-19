@@ -2,10 +2,13 @@
 wasted_wind_calc.py
 ===================
 
-Core calculation module for replicating wastedwind.energy Module 1.
+Core calculation module for replicating wastedwind.energy Modules 1 & 2.
 
-Calculates the daily cost paid to curtail (switch off) wind turbines in the
-GB electricity market using the public Elexon BMRS Insights Solution API.
+Module 1: Daily cost paid to curtail (switch off) wind turbines in the
+GB electricity market.
+
+Module 2: Cost of buying replacement energy (accepted offers) to replace
+the curtailed wind, calculated via merit-order stack.
 
 Elexon BMRS API endpoints used
 ------------------------------
@@ -16,64 +19,32 @@ Elexon BMRS API endpoints used
 
 - ``GET /balancing/settlement/acceptance/volumes/all/bid/{settlementDate}``
     Accepted bid volumes for a given settlement date.
-    ``settlementDate`` is a path parameter in ``YYYY-MM-DD`` format.
-    Optional query params: ``bmUnit`` (string array).
-    Response: a JSON array where each item has:
-    ``createdDateTime``, ``settlementDate``, ``settlementPeriod``,
-    ``startTime``, ``bmUnit``, ``bmUnitType``, ``leadPartyName``,
-    ``nationalGridBmUnit``, ``acceptanceId``, ``acceptanceDuration``,
-    ``totalVolumeAccepted``, ``pairVolumes``.
+    Response: a JSON array. Each item has ``pairVolumes`` with
+    ``negative1``–``negative6`` (accepted bid volumes, negative MWh).
 
-    ``pairVolumes`` is a nested object:
-        ``negative1`` … ``negative6``  – accepted bid volumes (MWh, negative)
-        ``positive1`` … ``positive6``  – accepted offer volumes (MWh, positive)
-
-    Only ``negative{N}`` values represent curtailment (bid accepted).
+- ``GET /balancing/settlement/acceptance/volumes/all/offer/{settlementDate}``
+    Accepted offer volumes for a given settlement date.
+    Response: a JSON array. Each item has ``pairVolumes`` with
+    ``positive1``–``positive6`` (accepted offer volumes, positive MWh).
 
 - ``GET /datasets/BOD/stream?from=...&to=...``
     Bid-Offer Data (submitted bid/offer prices) – streaming endpoint.
-    Query params: ``from`` (RFC 3339 date-time, required),
-                  ``to``   (RFC 3339 date-time, required).
-    Response: a raw JSON array ``[ ... ]`` (NOT wrapped in ``{"data": [...]}``).
-    Each item has:
-    ``dataset``, ``settlementDate``, ``settlementPeriod``,
-    ``timeFrom``, ``levelFrom``, ``timeTo``, ``levelTo``,
-    ``pairId``, ``offer``, ``bid``, ``nationalGridBmUnit``, ``bmUnit``.
-
-    - ``pairId < 0`` → BID (reduction).  Price in ``bid`` field.
-    - ``pairId > 0`` → OFFER (increase).  Price in ``offer`` field.
+    Response: a raw JSON array ``[ ... ]``.
+    - ``pairId < 0`` → BID. Price in ``bid`` field.
+    - ``pairId > 0`` → OFFER. Price in ``offer`` field.
 
 - ``GET /datasets/BOALF/stream?from=...&to=...``
     Bid-Offer Acceptance Level Flagged – streaming endpoint.
-    Query params: ``from`` (RFC 3339 date-time, required),
-                  ``to``   (RFC 3339 date-time, required).
-    Response: a raw JSON array ``[ ... ]``.
-    Each item has:
-    ``dataset``, ``settlementDate``, ``settlementPeriodFrom``,
-    ``settlementPeriodTo``, ``timeFrom``, ``timeTo``, ``levelFrom``,
-    ``levelTo``, ``acceptanceNumber``, ``acceptanceTime``,
-    ``deemedBoFlag``, ``soFlag``, ``amendmentFlag``, ``storFlag``,
-    ``rrFlag``, ``nationalGridBmUnit``, ``bmUnit``.
-
     - ``soFlag == True`` indicates a System Operator (constraint-related) action.
     - ``acceptanceNumber`` corresponds to BOAV's ``acceptanceId``.
 
-- ``GET /datasets/EBOCF?from=...&to=...``
-    Elexon's official Indicative Period BMU Cashflows.
-    Used for cross-checking our calculated totals.
-
 Sign convention (GB Balancing Mechanism cashflow)
 -------------------------------------------------
-- BOAV ``negative{N}`` volume is reported as a **negative** MWh value
-  (e.g. ``-12.5`` MWh accepted at pair -1).
-- BOD ``bid`` price preserves its sign:
-  - Negative price (e.g. ``-£85/MWh``): wind farm pays NESO to curtail.
-  - Positive price (e.g. ``+£20/MWh``): NESO pays wind farm to curtail
-    (e.g. to recover lost CfD/ROC subsidy).
-- Cashflow: ``cost = volume × price``
-  - ``-12.5 × -85 = +£1062.50``  → wind farm pays NESO (saving to system).
-  - ``-12.5 × +20 = -£250.00``   → NESO pays wind farm (cost to system).
-- For reporting: ``curtailed_mwh = abs(volume)`` (always positive).
+- BOAV bid ``negative{N}`` volume is **negative** MWh.
+- BOAV offer ``positive{N}`` volume is **positive** MWh.
+- BOD ``bid``/``offer`` price preserves its sign.
+- Bid cashflow: ``cost = volume × price`` (volume negative).
+- Offer cashflow: ``cost = volume × price`` (volume positive).
 """
 
 from __future__ import annotations
@@ -94,9 +65,14 @@ SETTLEMENT_PERIODS = 48
 PERIOD_DURATION_HOURS = 0.5
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 2.0
-API_CALL_DELAY = 1.0  # polite delay between successive API calls (seconds)
+API_CALL_DELAY = 1.0
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# BOD stream cache (avoid fetching the same day's data twice)
+# ---------------------------------------------------------------------------
+_bod_cache: dict[str, pd.DataFrame] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -110,25 +86,6 @@ def _get_with_retry(
     """
     Perform a GET request with basic retry / back-off for transient HTTP errors
     and rate-limit (429) responses.
-
-    Parameters
-    ----------
-    url : str
-        Full URL to request.
-    params : dict, optional
-        Query-string parameters.
-    headers : dict, optional
-        Additional request headers.
-
-    Returns
-    -------
-    requests.Response
-        The successful response object.
-
-    Raises
-    ------
-    requests.HTTPError
-        If all retries are exhausted.
     """
     last_exc: Optional[Exception] = None
     for attempt in range(1, MAX_RETRIES + 1):
@@ -167,21 +124,12 @@ def _fetch_bmu_reference() -> pd.DataFrame:
     Fetch the full BMU reference table from Elexon.
 
     Endpoint: ``GET {API_BASE}/reference/bmunits/all``
-    Returns a JSON array of BMU objects with camelCase fields.
-
-    Returns
-    -------
-    pd.DataFrame
-        Columns (original camelCase preserved):
-        ``elexonBmUnit``, ``nationalGridBmUnit``, ``bmUnitName``,
-        ``fuelType``, ``leadPartyName``, ``generationCapacity``, etc.
     """
     url = f"{API_BASE}/reference/bmunits/all"
     logger.info("Fetching BMU reference from %s", url)
     resp = _get_with_retry(url)
     data = resp.json()
 
-    # The API returns a JSON array directly per the schema
     if isinstance(data, dict):
         for key in ("data", "bmunits", "results"):
             if key in data:
@@ -192,7 +140,6 @@ def _fetch_bmu_reference() -> pd.DataFrame:
     if df.empty:
         return df
 
-    # Ensure string columns are stripped
     for col in df.columns:
         if df[col].dtype == object:
             df[col] = df[col].astype(str).str.strip()
@@ -205,30 +152,6 @@ def _fetch_boav_bid(target_date: str, bmu_ids: Optional[list[str]] = None) -> pd
     Fetch accepted bid volumes (BOAV) for a given settlement date.
 
     Endpoint: ``GET {API_BASE}/balancing/settlement/acceptance/volumes/all/bid/{settlementDate}``
-    The ``settlementDate`` is a path parameter in ``YYYY-MM-DD`` format.
-    Optional query param: ``bmUnit`` (array of BMU IDs).
-
-    Response: a JSON array where each item contains a nested ``pairVolumes``
-    object with ``negative1``–``negative6`` and ``positive1``–``positive6``.
-
-    This helper flattens ``pairVolumes`` into top-level columns.
-
-    Parameters
-    ----------
-    target_date : str
-        Settlement date in ``YYYY-MM-DD`` format.
-    bmu_ids : list[str], optional
-        If provided, only return data for these BMUs.
-
-    Returns
-    -------
-    pd.DataFrame
-        Columns: ``settlementDate``, ``settlementPeriod``, ``startTime``,
-        ``bmUnit``, ``bmUnitType``, ``leadPartyName``,
-        ``nationalGridBmUnit``, ``acceptanceId``, ``acceptanceDuration``,
-        ``totalVolumeAccepted``, ``negative1``–``negative6``,
-        ``positive1``–``positive6``.
-        Empty DataFrame if no data returned.
     """
     url = f"{API_BASE}/balancing/settlement/acceptance/volumes/all/bid/{target_date}"
     params: dict = {}
@@ -241,8 +164,6 @@ def _fetch_boav_bid(target_date: str, bmu_ids: Optional[list[str]] = None) -> pd
     resp = _get_with_retry(url, params=params)
     payload = resp.json()
 
-    # The response is a bare JSON array (per boav_bid_sample.json)
-    # but handle the wrapped case too
     if isinstance(payload, dict):
         records = payload.get("data", [])
     elif isinstance(payload, list):
@@ -254,7 +175,6 @@ def _fetch_boav_bid(target_date: str, bmu_ids: Optional[list[str]] = None) -> pd
         logger.warning("BOAV bid returned no data for %s.", target_date)
         return pd.DataFrame()
 
-    # Flatten the nested pairVolumes object into top-level columns
     flat_records: list[dict] = []
     for rec in records:
         pair_vols = rec.pop("pairVolumes", None) or {}
@@ -265,7 +185,6 @@ def _fetch_boav_bid(target_date: str, bmu_ids: Optional[list[str]] = None) -> pd
 
     df = pd.DataFrame(flat_records)
 
-    # Ensure numeric types
     numeric_cols = (
         ["settlementPeriod", "acceptanceId", "totalVolumeAccepted"]
         + [f"negative{n}" for n in range(1, 7)]
@@ -275,7 +194,61 @@ def _fetch_boav_bid(target_date: str, bmu_ids: Optional[list[str]] = None) -> pd
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Ensure string types
+    for col in ("bmUnit", "nationalGridBmUnit", "settlementDate",
+                "bmUnitType", "leadPartyName", "acceptanceDuration"):
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip()
+
+    return df
+
+
+def _fetch_boav_offer(target_date: str, bmu_ids: Optional[list[str]] = None) -> pd.DataFrame:
+    """
+    Fetch accepted offer volumes (BOAV) for a given settlement date.
+
+    Endpoint: ``GET {API_BASE}/balancing/settlement/acceptance/volumes/all/offer/{settlementDate}``
+    """
+    url = f"{API_BASE}/balancing/settlement/acceptance/volumes/all/offer/{target_date}"
+    params: dict = {}
+    if bmu_ids:
+        params["bmUnit"] = bmu_ids
+
+    logger.info("Fetching BOAV offer for %s (%d BMU filter%s)",
+                target_date, len(bmu_ids) if bmu_ids else 0,
+                "" if bmu_ids else "s – all")
+    resp = _get_with_retry(url, params=params)
+    payload = resp.json()
+
+    if isinstance(payload, dict):
+        records = payload.get("data", [])
+    elif isinstance(payload, list):
+        records = payload
+    else:
+        records = []
+
+    if not records:
+        logger.warning("BOAV offer returned no data for %s.", target_date)
+        return pd.DataFrame()
+
+    flat_records: list[dict] = []
+    for rec in records:
+        pair_vols = rec.pop("pairVolumes", None) or {}
+        for n in range(1, 7):
+            rec[f"negative{n}"] = pair_vols.get(f"negative{n}")
+            rec[f"positive{n}"] = pair_vols.get(f"positive{n}")
+        flat_records.append(rec)
+
+    df = pd.DataFrame(flat_records)
+
+    numeric_cols = (
+        ["settlementPeriod", "acceptanceId", "totalVolumeAccepted"]
+        + [f"negative{n}" for n in range(1, 7)]
+        + [f"positive{n}" for n in range(1, 7)]
+    )
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
     for col in ("bmUnit", "nationalGridBmUnit", "settlementDate",
                 "bmUnitType", "leadPartyName", "acceptanceDuration"):
         if col in df.columns:
@@ -287,34 +260,17 @@ def _fetch_boav_bid(target_date: str, bmu_ids: Optional[list[str]] = None) -> pd
 def _fetch_bod_stream(target_date: str) -> pd.DataFrame:
     """
     Fetch Bid-Offer Data (BOD) for a given settlement date using the
-    streaming endpoint to avoid dataset size limits.
+    streaming endpoint. Results are cached per date to avoid duplicate fetches.
 
     Endpoint: ``GET {API_BASE}/datasets/BOD/stream``
-    Parameters:
-        - ``from``: RFC 3339 date-time (start of settlement day, e.g. ``2026-11-17T00:00Z``)
-        - ``to``:   RFC 3339 date-time (end of settlement day, e.g. ``2026-11-18T00:00Z``)
-
-    Note: The ``/stream`` endpoint returns a raw JSON array ``[ ... ]``
-    directly (NOT wrapped in ``{"data": [...]}``).  This avoids the 400
-    Bad Request that the non-streaming ``/datasets/BOD`` endpoint returns
-    for full-day unfiltered queries due to Elexon's dataset size limit.
-
-    Parameters
-    ----------
-    target_date : str
-        Settlement date in ``YYYY-MM-DD`` format.
-
-    Returns
-    -------
-    pd.DataFrame
-        Columns: ``settlementDate``, ``settlementPeriod``, ``timeFrom``,
-        ``levelFrom``, ``timeTo``, ``levelTo``, ``pairId``, ``offer``,
-        ``bid``, ``nationalGridBmUnit``, ``bmUnit``.
-        Empty DataFrame if no data returned.
     """
+    # Check cache first
+    if target_date in _bod_cache:
+        logger.info("BOD stream for %s served from cache.", target_date)
+        return _bod_cache[target_date].copy()
+
     url = f"{API_BASE}/datasets/BOD/stream"
 
-    # Cover the full settlement day using the API's expected date format (no seconds)
     dt = datetime.strptime(target_date, "%Y-%m-%d")
     next_dt = dt + timedelta(days=1)
     from_str = dt.strftime("%Y-%m-%dT00:00Z")
@@ -325,16 +281,13 @@ def _fetch_bod_stream(target_date: str) -> pd.DataFrame:
         "to": to_str,
     }
 
-    logger.info("Fetching BOD stream for %s (full day, filtering locally)",
-                target_date)
+    logger.info("Fetching BOD stream for %s (full day, filtering locally)", target_date)
     resp = _get_with_retry(url, params=params)
     payload = resp.json()
 
-    # The /stream endpoint returns a raw JSON array directly
     if isinstance(payload, list):
         records = payload
     elif isinstance(payload, dict):
-        # Handle the wrapped case just in case
         records = payload.get("data", [])
     else:
         records = []
@@ -345,17 +298,18 @@ def _fetch_bod_stream(target_date: str) -> pd.DataFrame:
 
     df = pd.DataFrame(records)
 
-    # Ensure numeric types
     for col in ("settlementPeriod", "levelFrom", "levelTo", "pairId", "bid", "offer"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Ensure string types
     for col in ("bmUnit", "nationalGridBmUnit", "settlementDate"):
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip()
 
     logger.info("BOD stream returned %d total record(s) for %s.", len(df), target_date)
+
+    # Cache the result
+    _bod_cache[target_date] = df.copy()
     return df
 
 
@@ -365,31 +319,6 @@ def _fetch_boalf_stream(target_date: str) -> pd.DataFrame:
     settlement date using the streaming endpoint.
 
     Endpoint: ``GET {API_BASE}/datasets/BOALF/stream``
-    Parameters:
-        - ``from``: RFC 3339 date-time (start of settlement day)
-        - ``to``:   RFC 3339 date-time (end of settlement day)
-
-    Response: a raw JSON array ``[ ... ]``.
-    Each item has:
-    ``dataset``, ``settlementDate``, ``settlementPeriodFrom``,
-    ``settlementPeriodTo``, ``timeFrom``, ``timeTo``, ``levelFrom``,
-    ``levelTo``, ``acceptanceNumber``, ``acceptanceTime``,
-    ``deemedBoFlag``, ``soFlag``, ``amendmentFlag``, ``storFlag``,
-    ``rrFlag``, ``nationalGridBmUnit``, ``bmUnit``.
-
-    Parameters
-    ----------
-    target_date : str
-        Settlement date in ``YYYY-MM-DD`` format.
-
-    Returns
-    -------
-    pd.DataFrame
-        Columns: ``settlementDate``, ``settlementPeriodFrom``,
-        ``settlementPeriodTo``, ``levelFrom``, ``levelTo``,
-        ``acceptanceNumber``, ``soFlag``, ``deemedBoFlag``,
-        ``bmUnit``, ``nationalGridBmUnit``, etc.
-        Empty DataFrame if no data returned.
     """
     url = f"{API_BASE}/datasets/BOALF/stream"
 
@@ -407,7 +336,6 @@ def _fetch_boalf_stream(target_date: str) -> pd.DataFrame:
     resp = _get_with_retry(url, params=params)
     payload = resp.json()
 
-    # The /stream endpoint returns a raw JSON array directly
     if isinstance(payload, list):
         records = payload
     elif isinstance(payload, dict):
@@ -421,18 +349,15 @@ def _fetch_boalf_stream(target_date: str) -> pd.DataFrame:
 
     df = pd.DataFrame(records)
 
-    # Ensure numeric types
     for col in ("settlementPeriodFrom", "settlementPeriodTo",
                 "levelFrom", "levelTo", "acceptanceNumber"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Ensure boolean types
     for col in ("soFlag", "deemedBoFlag", "storFlag", "rrFlag"):
         if col in df.columns:
             df[col] = df[col].astype(bool)
 
-    # Ensure string types
     for col in ("bmUnit", "nationalGridBmUnit", "settlementDate"):
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip()
@@ -444,29 +369,6 @@ def _fetch_boalf_stream(target_date: str) -> pd.DataFrame:
 def _fetch_ebocf(target_date: str, bmu_ids: Optional[list[str]] = None) -> pd.DataFrame:
     """
     Fetch Elexon's official Indicative Period BMU Cashflows (EBOCF) for cross-checking.
-
-    Endpoint: ``GET {API_BASE}/datasets/EBOCF``
-    Parameters:
-        - ``from``: RFC 3339 date-time
-        - ``to``:   RFC 3339 date-time
-        - ``format``: ``json``
-
-    Response: ``{"data": [ ... ]}`` where each item has:
-    ``settlementDate``, ``settlementPeriod``, ``startTime``,
-    ``bmUnit``, ``bmUnitType``, ``leadPartyName``,
-    ``nationalGridBmUnit``, ``bidOfferPairCashflows``, ``totalCashflow``.
-
-    Parameters
-    ----------
-    target_date : str
-        Settlement date in ``YYYY-MM-DD`` format.
-    bmu_ids : list[str], optional
-        If provided, filter locally to these BMUs.
-
-    Returns
-    -------
-    pd.DataFrame
-        Flattened EBOCF data. Empty DataFrame if unavailable.
     """
     url = f"{API_BASE}/datasets/EBOCF"
 
@@ -497,7 +399,6 @@ def _fetch_ebocf(target_date: str, bmu_ids: Optional[list[str]] = None) -> pd.Da
             logger.info("EBOCF returned no data for %s.", target_date)
             return pd.DataFrame()
 
-        # Flatten bidOfferPairCashflows
         flat_records: list[dict] = []
         for rec in records:
             cashflows = rec.pop("bidOfferPairCashflows", None) or {}
@@ -514,7 +415,6 @@ def _fetch_ebocf(target_date: str, bmu_ids: Optional[list[str]] = None) -> pd.Da
             else:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        # Filter locally if bmu_ids provided
         if bmu_ids and "bmUnit" in df.columns:
             df = df[df["bmUnit"].isin(bmu_ids)].reset_index(drop=True)
 
@@ -527,38 +427,18 @@ def _fetch_ebocf(target_date: str, bmu_ids: Optional[list[str]] = None) -> pd.Da
 
 
 # ---------------------------------------------------------------------------
-# Public API – the three required functions
+# MODULE 1 – Wind Curtailment Bid Cost
 # ---------------------------------------------------------------------------
 def get_curtailed_wind_bmus(target_date: str) -> pd.DataFrame:
     """
     Identify all Wind BMUs that had an **accepted bid** (curtailed) on
     ``target_date``.
 
-    Steps
-    -----
-    1. Fetch the BMU reference (``/reference/bmunits/all``) and filter to
-       ``fuelType == "WIND"``.
-    2. Fetch accepted bid volumes from
-       ``/balancing/settlement/acceptance/volumes/all/bid/{target_date}``.
-    3. For each record, check ``negative1`` through ``negative6``
-       (accepted bid volumes, reported as negative MWh).
-    4. Only include records where at least one ``negative{N}`` is non-zero.
-       Do NOT include ``positive{N}`` (offers/turn-ups).
-    5. Expand into one row per non-zero negative pair volume.
-    6. Fetch BOALF and tag each record with ``is_system_flag`` based on
-       ``soFlag`` (matching ``acceptanceId`` to ``acceptanceNumber``).
-
-    Parameters
-    ----------
-    target_date : str
-        Settlement date ``YYYY-MM-DD``.
-
     Returns
     -------
     pd.DataFrame
         Columns: ``elexonBmUnit``, ``bmUnitName``, ``settlementPeriod``,
-        ``pairId`` (negative, e.g. -1, -2), ``acceptedVolumeMWh``
-        (negative value, e.g. -12.5), ``is_system_flag`` (bool).
+        ``pairId``, ``acceptedVolumeMWh``, ``is_system_flag``.
     """
     empty_result = pd.DataFrame(columns=[
         "elexonBmUnit", "bmUnitName", "settlementPeriod",
@@ -566,15 +446,13 @@ def get_curtailed_wind_bmus(target_date: str) -> pd.DataFrame:
     ])
 
     try:
-        # 1 – Get wind BMUs from reference data
         bmu_ref = _fetch_bmu_reference()
         if bmu_ref.empty:
             logger.error("BMU reference returned no data.")
             return empty_result
 
         if "fuelType" not in bmu_ref.columns:
-            logger.error("BMU reference missing 'fuelType' column. Columns: %s",
-                         list(bmu_ref.columns))
+            logger.error("BMU reference missing 'fuelType' column.")
             return empty_result
 
         wind_bmus = bmu_ref[bmu_ref["fuelType"].str.upper() == "WIND"].copy()
@@ -589,23 +467,19 @@ def get_curtailed_wind_bmus(target_date: str) -> pd.DataFrame:
         wind_bmu_ids = set(wind_bmus["elexonBmUnit"].tolist())
         logger.info("Found %d WIND BMUs in reference data.", len(wind_bmu_ids))
 
-        # Build name lookup
         name_map: dict[str, str] = {}
         if "bmUnitName" in wind_bmus.columns:
             for _, row in wind_bmus.iterrows():
                 name_map[row["elexonBmUnit"]] = row["bmUnitName"]
 
-        # 2 – Fetch accepted bid volumes (BOAV bid) for the target date
         time.sleep(API_CALL_DELAY)
         boav = _fetch_boav_bid(target_date)
         if boav.empty:
             logger.warning("BOAV bid returned no data for %s.", target_date)
             return empty_result
 
-        # 3 – Filter to wind BMUs
         if "bmUnit" not in boav.columns:
-            logger.error("BOAV data missing 'bmUnit' column. Columns: %s",
-                         list(boav.columns))
+            logger.error("BOAV data missing 'bmUnit' column.")
             return empty_result
 
         wind_boav = boav[boav["bmUnit"].isin(wind_bmu_ids)].copy()
@@ -613,7 +487,6 @@ def get_curtailed_wind_bmus(target_date: str) -> pd.DataFrame:
             logger.info("No BOAV bid records for wind BMUs on %s.", target_date)
             return empty_result
 
-        # 4 – Expand: one row per non-zero negative{N} pair volume
         rows: list[dict] = []
         for _, rec in wind_boav.iterrows():
             bmu = rec["bmUnit"]
@@ -629,7 +502,7 @@ def get_curtailed_wind_bmus(target_date: str) -> pd.DataFrame:
                         "bmUnitName": name,
                         "settlementPeriod": period,
                         "pairId": -n,
-                        "acceptedVolumeMWh": float(vol),  # negative value
+                        "acceptedVolumeMWh": float(vol),
                         "acceptanceId": acceptance_id,
                     })
 
@@ -639,12 +512,10 @@ def get_curtailed_wind_bmus(target_date: str) -> pd.DataFrame:
 
         result = pd.DataFrame(rows)
 
-        # 5 – Fetch BOALF and tag with soFlag
         time.sleep(API_CALL_DELAY)
         boalf = _fetch_boalf_stream(target_date)
 
         if not boalf.empty and "acceptanceNumber" in boalf.columns and "soFlag" in boalf.columns:
-            # Build a set of (bmUnit, acceptanceNumber) where soFlag is True
             system_flags = set()
             for _, boalf_row in boalf.iterrows():
                 if boalf_row.get("soFlag") is True:
@@ -653,7 +524,6 @@ def get_curtailed_wind_bmus(target_date: str) -> pd.DataFrame:
                     if bmu_key and acc_num is not None and not pd.isna(acc_num):
                         system_flags.add((bmu_key, int(acc_num)))
 
-            # Tag each row
             is_system = []
             for _, row in result.iterrows():
                 bmu = row["elexonBmUnit"]
@@ -670,14 +540,11 @@ def get_curtailed_wind_bmus(target_date: str) -> pd.DataFrame:
                 n_system, len(result),
             )
         else:
-            # BOALF unavailable – default all to False
             result["is_system_flag"] = False
             logger.warning(
-                "BOALF data unavailable or missing soFlag/acceptanceNumber. "
-                "Defaulting all records to is_system_flag=False."
+                "BOALF data unavailable. Defaulting all to is_system_flag=False."
             )
 
-        # Drop the temporary acceptanceId column
         result = result.drop(columns=["acceptanceId"], errors="ignore")
 
         logger.info("Identified %d accepted bid record(s) across %d BMU(s).",
@@ -692,46 +559,21 @@ def get_curtailed_wind_bmus(target_date: str) -> pd.DataFrame:
 def get_accepted_bid_prices(target_date: str, bmu_ids: list[str]) -> pd.DataFrame:
     """
     Retrieve the bid prices (£/MWh) for the accepted wind bids.
-
-    Uses the ``/datasets/BOD/stream`` endpoint (streaming) to avoid the
-    400 Bad Request that the non-streaming endpoint returns for full-day
-    unfiltered queries.  The stream endpoint returns a raw JSON array.
-
-    Filters locally to the given BMU IDs and ``pairId < 0`` (bids).
-
-    The ``pairId`` in BOD corresponds directly to the BOAV pair number:
-    BOAV ``negative1`` ↔ BOD ``pairId == -1``, etc.
-
-    Parameters
-    ----------
-    target_date : str
-        Settlement date ``YYYY-MM-DD``.
-    bmu_ids : list[str]
-        Elexon BMU identifiers (``elexonBmUnit``) from
-        :func:`get_curtailed_wind_bmus`.
-
-    Returns
-    -------
-    pd.DataFrame
-        Columns: ``elexonBmUnit``, ``settlementPeriod``, ``pairId``,
-        ``price`` (£/MWh, sign preserved).
+    Uses the cached BOD stream endpoint.
     """
     empty_result = pd.DataFrame(columns=["elexonBmUnit", "settlementPeriod", "pairId", "price"])
 
     try:
         time.sleep(API_CALL_DELAY)
-        # Fetch ALL BOD data for the day via the streaming endpoint
         bod = _fetch_bod_stream(target_date)
         if bod.empty:
             logger.warning("BOD stream returned no data for %s.", target_date)
             return empty_result
 
         if "bmUnit" not in bod.columns or "pairId" not in bod.columns:
-            logger.error("BOD data missing required columns. Columns: %s",
-                         list(bod.columns))
+            logger.error("BOD data missing required columns.")
             return empty_result
 
-        # Filter locally to our BMUs and bids only (pairId < 0)
         bmu_set = set(bmu_ids)
         mask = (
             (bod["bmUnit"].isin(bmu_set))
@@ -740,17 +582,12 @@ def get_accepted_bid_prices(target_date: str, bmu_ids: list[str]) -> pd.DataFram
         bids = bod[mask].copy()
 
         if bids.empty:
-            logger.warning(
-                "No bid records found for the %d BMU IDs on %s. "
-                "BOD has %d total records. Sample bmUnit values: %s",
-                len(bmu_ids), target_date, len(bod),
-                bod["bmUnit"].unique()[:5].tolist(),
-            )
+            logger.warning("No bid records found for the %d BMU IDs on %s.",
+                           len(bmu_ids), target_date)
             return empty_result
 
         if "bid" not in bids.columns:
-            logger.error("BOD data missing 'bid' price column. Columns: %s",
-                         list(bids.columns))
+            logger.error("BOD data missing 'bid' price column.")
             return empty_result
 
         result = pd.DataFrame({
@@ -775,43 +612,7 @@ def calculate_daily_wind_bid_cost(
     target_date: Optional[str] = None,
 ) -> pd.DataFrame:
     """
-    Calculate the daily wind curtailment bid cost.
-
-    This function is **decoupled** from any API logic.  It receives two
-    DataFrames (accepted volumes and prices) and performs the arithmetic.
-
-    Sign convention (GB BM cashflow):
-    - ``acceptedVolumeMWh`` is **negative** (e.g. ``-12.5``) from BOAV.
-    - ``price`` preserves its sign from BOD (e.g. ``-85.0`` or ``+20.0``).
-    - ``cost_gbp = acceptedVolumeMWh × price``
-      - ``-12.5 × -85.0 = +£1062.50`` → wind farm pays NESO (saving to system).
-      - ``-12.5 × +20.0 = -£250.00``  → NESO pays wind farm (cost to system).
-    - ``curtailed_mwh = abs(acceptedVolumeMWh)`` (always positive, for reporting).
-
-    The function computes two summary blocks:
-    - **All Accepted Wind Bids:** total MWh, avg £/MWh, total cost.
-    - **System-Related (soFlag=True):** total MWh, avg £/MWh, total cost.
-    - **Non-System (energy balancing):** the remainder.
-
-    Parameters
-    ----------
-    acceptances : pd.DataFrame
-        Output of :func:`get_curtailed_wind_bmus`.
-        Must contain: ``elexonBmUnit``, ``settlementPeriod``, ``pairId``,
-        ``acceptedVolumeMWh`` (negative), ``bmUnitName``, ``is_system_flag``.
-    prices : pd.DataFrame
-        Output of :func:`get_accepted_bid_prices`.
-        Must contain: ``elexonBmUnit``, ``settlementPeriod``, ``pairId``,
-        ``price``.
-    target_date : str, optional
-        Settlement date for EBOCF cross-check logging.
-
-    Returns
-    -------
-    pd.DataFrame
-        One row per BMU with columns:
-        ``elexonBmUnit``, ``bmUnitName``, ``curtailed_mwh``,
-        ``avg_price``, ``total_cost``, ``is_system_flag``.
+    Calculate the daily wind curtailment bid cost (Module 1).
     """
     empty_cols = ["elexonBmUnit", "bmUnitName", "curtailed_mwh",
                   "avg_price", "total_cost", "is_system_flag"]
@@ -819,17 +620,14 @@ def calculate_daily_wind_bid_cost(
         logger.warning("Empty input data – returning empty result.")
         return pd.DataFrame(columns=empty_cols)
 
-    # Ensure merge keys are consistently typed
     for df in (acceptances, prices):
         df["elexonBmUnit"] = df["elexonBmUnit"].astype(str).str.strip()
         df["settlementPeriod"] = pd.to_numeric(df["settlementPeriod"], errors="coerce").astype(int)
         df["pairId"] = pd.to_numeric(df["pairId"], errors="coerce").astype(int)
 
-    # Ensure is_system_flag exists
     if "is_system_flag" not in acceptances.columns:
         acceptances["is_system_flag"] = False
 
-    # Merge on the three key columns
     merged = acceptances.merge(
         prices,
         on=["elexonBmUnit", "settlementPeriod", "pairId"],
@@ -837,24 +635,12 @@ def calculate_daily_wind_bid_cost(
     )
 
     if merged.empty:
-        logger.warning(
-            "No matching records after merge. "
-            "Acceptances: %d rows, Prices: %d rows. "
-            "Sample acceptance keys: %s",
-            len(acceptances), len(prices),
-            acceptances[["elexonBmUnit", "settlementPeriod", "pairId"]].head(3).to_dict("records"),
-        )
+        logger.warning("No matching records after merge.")
         return pd.DataFrame(columns=empty_cols)
 
-    # curtailed_mwh is always positive (for reporting)
     merged["curtailed_mwh"] = merged["acceptedVolumeMWh"].abs()
-
-    # cost = volume × price (preserving signs)
-    # negative volume × negative price = positive (wind farm pays NESO)
-    # negative volume × positive price = negative (NESO pays wind farm)
     merged["cost_gbp"] = merged["acceptedVolumeMWh"] * merged["price"]
 
-    # Aggregate per BMU
     summary = (
         merged
         .groupby(["elexonBmUnit", "bmUnitName", "is_system_flag"], as_index=False)
@@ -865,13 +651,8 @@ def calculate_daily_wind_bid_cost(
     )
     summary["avg_price"] = summary["total_cost"] / summary["curtailed_mwh"].replace(0, pd.NA)
     summary["avg_price"] = summary["avg_price"].fillna(0.0)
-
-    # Sort by total cost descending for the summary table
     summary = summary.sort_values("total_cost", ascending=False).reset_index(drop=True)
 
-    # ------------------------------------------------------------------
-    # Log both summary blocks
-    # ------------------------------------------------------------------
     total_mwh_all = summary["curtailed_mwh"].sum()
     total_cost_all = summary["total_cost"].sum()
     avg_price_all = total_cost_all / total_mwh_all if total_mwh_all > 0 else 0.0
@@ -898,15 +679,10 @@ def calculate_daily_wind_bid_cost(
         total_mwh_non, avg_price_non, total_cost_non,
     )
 
-    # ------------------------------------------------------------------
-    # EBOCF cross-check (optional, non-fatal)
-    # ------------------------------------------------------------------
     if target_date:
         try:
-            ebocf = _fetch_ebocf(
-                target_date=target_date,
-                bmu_ids=summary["elexonBmUnit"].tolist(),
-            )
+            ebocf = _fetch_ebocf(target_date=target_date,
+                                bmu_ids=summary["elexonBmUnit"].tolist())
             if not ebocf.empty and "totalCashflow" in ebocf.columns:
                 ebocf_total = pd.to_numeric(ebocf["totalCashflow"], errors="coerce").sum()
                 logger.info(
@@ -917,3 +693,310 @@ def calculate_daily_wind_bid_cost(
             logger.debug("EBOCF cross-check skipped: %s", exc)
 
     return summary
+
+
+# ---------------------------------------------------------------------------
+# MODULE 2 – Replacement Energy (Accepted Offer) Merit-Order Cost
+# ---------------------------------------------------------------------------
+def get_accepted_offer_volumes(target_date: str) -> pd.DataFrame:
+    """
+    Function 4: Retrieve all accepted offer volumes across ALL BMUs for
+    ``target_date``.
+
+    Queries ``/balancing/settlement/acceptance/volumes/all/offer/{target_date}``
+    and extracts non-zero ``positive1`` through ``positive6`` values.
+    Joins against the BMU reference for ``fuelType`` and ``bmUnitName``.
+
+    Parameters
+    ----------
+    target_date : str
+        Settlement date ``YYYY-MM-DD``.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``bmUnit``, ``assetName``, ``fuelType``,
+        ``settlementPeriod``, ``pairId`` (+1..+6), ``offer_mwh`` (positive).
+    """
+    empty_result = pd.DataFrame(columns=[
+        "bmUnit", "assetName", "fuelType",
+        "settlementPeriod", "pairId", "offer_mwh",
+    ])
+
+    try:
+        # Fetch BMU reference for names and fuel types
+        bmu_ref = _fetch_bmu_reference()
+        name_map: dict[str, str] = {}
+        fuel_map: dict[str, str] = {}
+        if not bmu_ref.empty and "elexonBmUnit" in bmu_ref.columns:
+            for _, row in bmu_ref.iterrows():
+                bmu_id = row["elexonBmUnit"]
+                name_map[bmu_id] = row.get("bmUnitName", "Unknown")
+                fuel_map[bmu_id] = row.get("fuelType", "UNKNOWN")
+
+        # Fetch BOAV offer data
+        time.sleep(API_CALL_DELAY)
+        boav = _fetch_boav_offer(target_date)
+        if boav.empty:
+            logger.warning("BOAV offer returned no data for %s.", target_date)
+            return empty_result
+
+        if "bmUnit" not in boav.columns:
+            logger.error("BOAV offer data missing 'bmUnit' column.")
+            return empty_result
+
+        # Expand: one row per non-zero positive{N} pair volume
+        rows: list[dict] = []
+        for _, rec in boav.iterrows():
+            bmu = rec["bmUnit"]
+            period = int(rec["settlementPeriod"])
+            name = name_map.get(bmu, "Unknown")
+            fuel = fuel_map.get(bmu, "UNKNOWN")
+
+            for n in range(1, 7):
+                vol = rec.get(f"positive{n}")
+                if vol is not None and not pd.isna(vol) and vol != 0:
+                    rows.append({
+                        "bmUnit": bmu,
+                        "assetName": name,
+                        "fuelType": fuel,
+                        "settlementPeriod": period,
+                        "pairId": n,  # positive pairId for offers
+                        "offer_mwh": float(vol),  # positive value
+                    })
+
+        if not rows:
+            logger.info("No accepted offer volumes found on %s.", target_date)
+            return empty_result
+
+        result = pd.DataFrame(rows)
+        logger.info(
+            "Identified %d accepted offer record(s) across %d BMU(s).",
+            len(result), result["bmUnit"].nunique(),
+        )
+        return result
+
+    except (requests.exceptions.RequestException, ValueError, KeyError) as exc:
+        logger.error("Error in get_accepted_offer_volumes: %s", exc)
+        return empty_result
+
+
+def get_accepted_offer_prices(target_date: str, offer_bmu_ids: list[str]) -> pd.DataFrame:
+    """
+    Function 5: Retrieve the offer prices (£/MWh) for the accepted offers.
+
+    Reuses the cached BOD stream fetch (shared with Module 1).
+    Filters to ``pairId > 0`` (offers) for the given BMU IDs.
+
+    Parameters
+    ----------
+    target_date : str
+        Settlement date ``YYYY-MM-DD``.
+    offer_bmu_ids : list[str]
+        BMU identifiers from :func:`get_accepted_offer_volumes`.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``bmUnit``, ``settlementPeriod``, ``pairId``,
+        ``price`` (£/MWh, sign preserved).
+    """
+    empty_result = pd.DataFrame(columns=["bmUnit", "settlementPeriod", "pairId", "price"])
+
+    try:
+        # BOD stream is cached – no additional API call if already fetched
+        bod = _fetch_bod_stream(target_date)
+        if bod.empty:
+            logger.warning("BOD stream returned no data for %s.", target_date)
+            return empty_result
+
+        if "bmUnit" not in bod.columns or "pairId" not in bod.columns:
+            logger.error("BOD data missing required columns.")
+            return empty_result
+
+        bmu_set = set(offer_bmu_ids)
+        mask = (
+            (bod["bmUnit"].isin(bmu_set))
+            & (bod["pairId"] > 0)
+        )
+        offers = bod[mask].copy()
+
+        if offers.empty:
+            logger.warning("No offer records found for the %d BMU IDs on %s.",
+                           len(offer_bmu_ids), target_date)
+            return empty_result
+
+        if "offer" not in offers.columns:
+            logger.error("BOD data missing 'offer' price column.")
+            return empty_result
+
+        result = pd.DataFrame({
+            "bmUnit": offers["bmUnit"].values,
+            "settlementPeriod": offers["settlementPeriod"].astype(int).values,
+            "pairId": offers["pairId"].astype(int).values,
+            "price": offers["offer"].values,
+        })
+
+        logger.info("Retrieved %d offer price record(s) for %d BMU(s).",
+                    len(result), result["bmUnit"].nunique())
+        return result
+
+    except (requests.exceptions.RequestException, ValueError, KeyError) as exc:
+        logger.error("Error in get_accepted_offer_prices: %s", exc)
+        return empty_result
+
+
+def calculate_replacement_offer_cost(
+    bid_results: pd.DataFrame,
+    offer_stack: pd.DataFrame,
+) -> dict:
+    """
+    Function 6: Merit-order replacement cost calculation (Module 2).
+
+    Takes the total curtailed wind volume from Module 1 and walks down
+    the sorted offer stack (cheapest first) to determine the cost of
+    buying replacement energy.
+
+    Parameters
+    ----------
+    bid_results : pd.DataFrame
+        Output of :func:`calculate_daily_wind_bid_cost` (Module 1).
+        Used to extract the total curtailed wind MWh.
+    offer_stack : pd.DataFrame
+        Merged offer volumes + prices with columns:
+        ``bmUnit``, ``assetName``, ``fuelType``, ``settlementPeriod``,
+        ``pairId``, ``offer_mwh``, ``price``.
+
+    Returns
+    -------
+    dict
+        Keys:
+        - ``target_mwh``: total curtailed wind MWh from Module 1.
+        - ``matched_mwh``: MWh of offers matched (should equal target).
+        - ``replacement_cost_gbp``: total cost of replacement offers.
+        - ``weighted_avg_price``: volume-weighted average offer price.
+        - ``fuel_breakdown``: DataFrame with columns
+          ``fuelType``, ``mwh``, ``cost_gbp``, ``avg_price``.
+        - ``top_bmus``: DataFrame with top 10 contributing BMUs.
+        - ``total_offers_available``: total MWh of all accepted offers.
+        - ``shortfall``: True if total offers < target curtailed wind.
+    """
+    # Extract target from Module 1
+    target_mwh = float(bid_results["curtailed_mwh"].sum()) if not bid_results.empty else 0.0
+
+    if offer_stack.empty or target_mwh <= 0:
+        logger.warning("No offer data or zero target – returning empty result.")
+        return {
+            "target_mwh": target_mwh,
+            "matched_mwh": 0.0,
+            "replacement_cost_gbp": 0.0,
+            "weighted_avg_price": 0.0,
+            "fuel_breakdown": pd.DataFrame(columns=["fuelType", "mwh", "cost_gbp", "avg_price"]),
+            "top_bmus": pd.DataFrame(columns=["bmUnit", "assetName", "fuelType", "mwh", "cost_gbp"]),
+            "total_offers_available": 0.0,
+            "shortfall": True,
+        }
+
+    # Compute slice cost for each offer record
+    offer_stack = offer_stack.copy()
+    offer_stack["slice_cost"] = offer_stack["offer_mwh"] * offer_stack["price"]
+
+    total_offers_available = float(offer_stack["offer_mwh"].sum())
+    shortfall = total_offers_available < target_mwh
+
+    if shortfall:
+        logger.warning(
+            "Total accepted offers (%.1f MWh) < curtailed wind (%.1f MWh). "
+            "Using all available offers.",
+            total_offers_available, target_mwh,
+        )
+
+    # Sort by price ascending (merit order – cheapest first)
+    offer_stack = offer_stack.sort_values("price", ascending=True).reset_index(drop=True)
+
+    # Walk down the stack, accumulating MWh until we hit the target
+    cumulative_mwh = 0.0
+    cumulative_cost = 0.0
+    matched_rows: list[dict] = []
+
+    for _, row in offer_stack.iterrows():
+        if cumulative_mwh >= target_mwh:
+            break
+
+        remaining = target_mwh - cumulative_mwh
+        allocated = min(row["offer_mwh"], remaining)
+
+        # Pro-rate the cost for the allocated portion
+        if row["offer_mwh"] > 0:
+            allocated_cost = allocated * row["price"]
+        else:
+            allocated_cost = 0.0
+
+        cumulative_mwh += allocated
+        cumulative_cost += allocated_cost
+
+        matched_rows.append({
+            "bmUnit": row["bmUnit"],
+            "assetName": row.get("assetName", "Unknown"),
+            "fuelType": row.get("fuelType", "UNKNOWN"),
+            "settlementPeriod": row["settlementPeriod"],
+            "pairId": row["pairId"],
+            "offer_mwh": row["offer_mwh"],
+            "allocated_mwh": allocated,
+            "price": row["price"],
+            "allocated_cost": allocated_cost,
+        })
+
+    matched_df = pd.DataFrame(matched_rows) if matched_rows else pd.DataFrame()
+
+    matched_mwh = float(matched_df["allocated_mwh"].sum()) if not matched_df.empty else 0.0
+    replacement_cost = float(matched_df["allocated_cost"].sum()) if not matched_df.empty else 0.0
+    weighted_avg = replacement_cost / matched_mwh if matched_mwh > 0 else 0.0
+
+    # Fuel type breakdown
+    fuel_breakdown = pd.DataFrame(columns=["fuelType", "mwh", "cost_gbp", "avg_price"])
+    if not matched_df.empty:
+        fuel_breakdown = (
+            matched_df
+            .groupby("fuelType", as_index=False)
+            .agg(
+                mwh=("allocated_mwh", "sum"),
+                cost_gbp=("allocated_cost", "sum"),
+            )
+        )
+        fuel_breakdown["avg_price"] = (
+            fuel_breakdown["cost_gbp"] / fuel_breakdown["mwh"].replace(0, pd.NA)
+        ).fillna(0.0)
+        fuel_breakdown = fuel_breakdown.sort_values("cost_gbp", ascending=False).reset_index(drop=True)
+
+    # Top BMUs
+    top_bmus = pd.DataFrame(columns=["bmUnit", "assetName", "fuelType", "mwh", "cost_gbp"])
+    if not matched_df.empty:
+        top_bmus = (
+            matched_df
+            .groupby(["bmUnit", "assetName", "fuelType"], as_index=False)
+            .agg(
+                mwh=("allocated_mwh", "sum"),
+                cost_gbp=("allocated_cost", "sum"),
+            )
+            .sort_values("cost_gbp", ascending=False)
+            .head(10)
+            .reset_index(drop=True)
+        )
+
+    logger.info(
+        "MODULE 2 – Target: %.1f MWh | Matched: %.1f MWh | "
+        "Cost: £%.2f | Avg: £%.2f/MWh | Shortfall: %s",
+        target_mwh, matched_mwh, replacement_cost, weighted_avg, shortfall,
+    )
+
+    return {
+        "target_mwh": target_mwh,
+        "matched_mwh": matched_mwh,
+        "replacement_cost_gbp": replacement_cost,
+        "weighted_avg_price": weighted_avg,
+        "fuel_breakdown": fuel_breakdown,
+        "top_bmus": top_bmus,
+        "total_offers_available": total_offers_available,
+        "shortfall": shortfall,
+    }
