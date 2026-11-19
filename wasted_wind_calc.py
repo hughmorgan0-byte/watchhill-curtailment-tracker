@@ -14,16 +14,13 @@ Elexon BMRS API endpoints used
     Key fields: ``elexonBmUnit``, ``nationalGridBmUnit``, ``bmUnitName``,
     ``fuelType``, ``leadPartyName``, ``generationCapacity``, etc.
 
-- ``GET /datasets/BOAV?from=...&to=...``
-    Bid-Offer Acceptance Volumes – the *accepted* volumes per BMU,
-    settlement period, and pair.
-    Query params: ``from`` (RFC 3339 date-time, required),
-                  ``to``   (RFC 3339 date-time, required),
-                  ``bmUnit`` (string array, optional),
-                  ``format`` (json|xml|csv, optional).
-    Response: ``{"data": [ ... ]}`` where each item has:
-    ``settlementDate``, ``settlementPeriod``, ``startTime``,
-    ``bmUnit``, ``bmUnitType``, ``leadPartyName``,
+- ``GET /balancing/settlement/acceptance/volumes/all/bid/{settlementDate}``
+    Accepted bid volumes for a given settlement date.
+    ``settlementDate`` is a path parameter in ``YYYY-MM-DD`` format.
+    Optional query params: ``bmUnit`` (string array).
+    Response: a JSON array where each item has:
+    ``createdDateTime``, ``settlementDate``, ``settlementPeriod``,
+    ``startTime``, ``bmUnit``, ``bmUnitType``, ``leadPartyName``,
     ``nationalGridBmUnit``, ``acceptanceId``, ``acceptanceDuration``,
     ``totalVolumeAccepted``, ``pairVolumes``.
 
@@ -35,7 +32,10 @@ Elexon BMRS API endpoints used
 
 - ``GET /datasets/BOD?from=...&to=...``
     Bid-Offer Data (submitted bid/offer prices).
-    Same query params as BOAV.
+    Query params: ``from`` (RFC 3339 date-time, required),
+                  ``to``   (RFC 3339 date-time, required),
+                  ``bmUnit`` (string array, optional),
+                  ``format`` (json|xml|csv, optional).
     Response: ``{"data": [ ... ]}`` where each item has:
     ``dataset``, ``settlementDate``, ``settlementPeriod``,
     ``timeFrom``, ``levelFrom``, ``timeTo``, ``levelTo``,
@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import time
 import logging
+from datetime import datetime, timedelta
 from typing import Optional
 
 import pandas as pd
@@ -181,20 +182,16 @@ def _fetch_bmu_reference() -> pd.DataFrame:
     return df
 
 
-def _fetch_boav(target_date: str, bmu_ids: Optional[list[str]] = None) -> pd.DataFrame:
+def _fetch_boav_bid(target_date: str, bmu_ids: Optional[list[str]] = None) -> pd.DataFrame:
     """
-    Fetch Bid-Offer Acceptance Volumes (BOAV) for a given settlement date.
+    Fetch accepted bid volumes (BOAV) for a given settlement date.
 
-    Endpoint: ``GET {API_BASE}/datasets/BOAV``
-    Parameters:
-        - ``from``: RFC 3339 date-time (settlement date, time ignored)
-        - ``to``:   RFC 3339 date-time (settlement date, time ignored)
-        - ``bmUnit``: optional array of BMU IDs to filter
-        - ``format``: ``json``
+    Endpoint: ``GET {API_BASE}/balancing/settlement/acceptance/volumes/all/bid/{settlementDate}``
+    The ``settlementDate`` is a path parameter in ``YYYY-MM-DD`` format.
+    Optional query param: ``bmUnit`` (array of BMU IDs).
 
-    Response: ``{"data": [ ... ]}`` where each item contains a nested
-    ``pairVolumes`` object with ``negative1``–``negative6`` and
-    ``positive1``–``positive6`` fields.
+    Response: a JSON array where each item contains a nested ``pairVolumes``
+    object with ``negative1``–``negative6`` and ``positive1``–``positive6``.
 
     This helper flattens ``pairVolumes`` into top-level columns.
 
@@ -215,22 +212,19 @@ def _fetch_boav(target_date: str, bmu_ids: Optional[list[str]] = None) -> pd.Dat
         ``positive1``–``positive6``.
         Empty DataFrame if no data returned.
     """
-    url = f"{API_BASE}/datasets/BOAV"
-    params: dict = {
-        "from": f"{target_date}T00:00:00Z",
-        "to": f"{target_date}T00:00:00Z",
-        "format": "json",
-    }
+    url = f"{API_BASE}/balancing/settlement/acceptance/volumes/all/bid/{target_date}"
+    params: dict = {}
     if bmu_ids:
         params["bmUnit"] = bmu_ids
 
-    logger.info("Fetching BOAV for %s (%d BMU filter%s)",
+    logger.info("Fetching BOAV bid for %s (%d BMU filter%s)",
                 target_date, len(bmu_ids) if bmu_ids else 0,
                 "" if bmu_ids else "s – all")
     resp = _get_with_retry(url, params=params)
     payload = resp.json()
 
-    # Unwrap the response envelope
+    # The response is a bare JSON array (per boav_bid_sample.json)
+    # but handle the wrapped case too
     if isinstance(payload, dict):
         records = payload.get("data", [])
     elif isinstance(payload, list):
@@ -239,7 +233,7 @@ def _fetch_boav(target_date: str, bmu_ids: Optional[list[str]] = None) -> pd.Dat
         records = []
 
     if not records:
-        logger.warning("BOAV returned no data for %s.", target_date)
+        logger.warning("BOAV bid returned no data for %s.", target_date)
         return pd.DataFrame()
 
     # Flatten the nested pairVolumes object into top-level columns
@@ -278,8 +272,8 @@ def _fetch_bod(target_date: str, bmu_ids: Optional[list[str]] = None) -> pd.Data
 
     Endpoint: ``GET {API_BASE}/datasets/BOD``
     Parameters:
-        - ``from``: RFC 3339 date-time (settlement date, time ignored)
-        - ``to``:   RFC 3339 date-time (settlement date, time ignored)
+        - ``from``: RFC 3339 date-time (start of settlement day)
+        - ``to``:   RFC 3339 date-time (end of settlement day, next day 00:00)
         - ``bmUnit``: optional array of BMU IDs to filter
         - ``format``: ``json``
 
@@ -301,9 +295,16 @@ def _fetch_bod(target_date: str, bmu_ids: Optional[list[str]] = None) -> pd.Data
         Empty DataFrame if no data returned.
     """
     url = f"{API_BASE}/datasets/BOD"
+
+    # Cover the full settlement day: from 00:00 of target_date to 00:00 of next day
+    dt = datetime.strptime(target_date, "%Y-%m-%d")
+    next_dt = dt + timedelta(days=1)
+    from_str = dt.strftime("%Y-%m-%dT00:00:00Z")
+    to_str = next_dt.strftime("%Y-%m-%dT00:00:00Z")
+
     params: dict = {
-        "from": f"{target_date}T00:00:00Z",
-        "to": f"{target_date}T00:00:00Z",
+        "from": from_str,
+        "to": to_str,
         "format": "json",
     }
     if bmu_ids:
@@ -354,8 +355,9 @@ def get_curtailed_wind_bmus(target_date: str) -> pd.DataFrame:
     -----
     1. Fetch the BMU reference (``/reference/bmunits/all``) and filter to
        ``fuelType == "WIND"``.
-    2. Fetch BOAV data (``/datasets/BOAV``) for the target date.
-    3. For each BOAV record, check ``negative1`` through ``negative6``
+    2. Fetch accepted bid volumes from
+       ``/balancing/settlement/acceptance/volumes/all/bid/{target_date}``.
+    3. For each record, check ``negative1`` through ``negative6``
        (accepted bid volumes, reported as negative MWh).
     4. Only include records where at least one ``negative{N}`` is non-zero.
        Do NOT include ``positive{N}`` (offers/turn-ups).
@@ -408,11 +410,11 @@ def get_curtailed_wind_bmus(target_date: str) -> pd.DataFrame:
             for _, row in wind_bmus.iterrows():
                 name_map[row["elexonBmUnit"]] = row["bmUnitName"]
 
-        # 2 – Fetch BOAV data for the target date
+        # 2 – Fetch accepted bid volumes (BOAV bid) for the target date
         time.sleep(API_CALL_DELAY)
-        boav = _fetch_boav(target_date)
+        boav = _fetch_boav_bid(target_date)
         if boav.empty:
-            logger.warning("BOAV returned no data for %s.", target_date)
+            logger.warning("BOAV bid returned no data for %s.", target_date)
             return empty_result
 
         # 3 – Filter to wind BMUs
@@ -423,7 +425,7 @@ def get_curtailed_wind_bmus(target_date: str) -> pd.DataFrame:
 
         wind_boav = boav[boav["bmUnit"].isin(wind_bmu_ids)].copy()
         if wind_boav.empty:
-            logger.info("No BOAV records for wind BMUs on %s.", target_date)
+            logger.info("No BOAV bid records for wind BMUs on %s.", target_date)
             return empty_result
 
         # 4 – Expand: one row per non-zero negative{N} pair volume
