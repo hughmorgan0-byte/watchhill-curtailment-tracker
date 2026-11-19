@@ -61,7 +61,7 @@ def main() -> None:
 
     # Step 3 – Calculate daily cost
     print("[3/3] Calculating daily wind bid cost ...")
-    results = calculate_daily_wind_bid_cost(acceptances, prices)
+    results = calculate_daily_wind_bid_cost(acceptances, prices, target_date=TARGET_DATE)
 
     if results.empty:
         print("  No cost data to display.")
