@@ -30,13 +30,12 @@ Elexon BMRS API endpoints used
 
     Only ``negative{N}`` values represent curtailment (bid accepted).
 
-- ``GET /datasets/BOD?from=...&to=...``
-    Bid-Offer Data (submitted bid/offer prices).
+- ``GET /datasets/BOD/stream?from=...&to=...``
+    Bid-Offer Data (submitted bid/offer prices) – streaming endpoint.
     Query params: ``from`` (RFC 3339 date-time, required),
-                  ``to``   (RFC 3339 date-time, required),
-                  ``bmUnit`` (string array, optional),
-                  ``format`` (json|xml|csv, optional).
-    Response: ``{"data": [ ... ]}`` where each item has:
+                  ``to``   (RFC 3339 date-time, required).
+    Response: a raw JSON array ``[ ... ]`` (NOT wrapped in ``{"data": [...]}``).
+    Each item has:
     ``dataset``, ``settlementDate``, ``settlementPeriod``,
     ``timeFrom``, ``levelFrom``, ``timeTo``, ``levelTo``,
     ``pairId``, ``offer``, ``bid``, ``nationalGridBmUnit``, ``bmUnit``.
@@ -125,7 +124,7 @@ def _get_with_retry(
     last_exc: Optional[Exception] = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            resp = requests.get(url, params=params, headers=headers, timeout=60)
+            resp = requests.get(url, params=params, headers=headers, timeout=120)
             if resp.status_code == 429:
                 wait = int(resp.headers.get("Retry-After", str(RETRY_BACKOFF_SECONDS * attempt)))
                 logger.warning("Rate limited (429). Waiting %d s …", wait)
@@ -276,21 +275,20 @@ def _fetch_boav_bid(target_date: str, bmu_ids: Optional[list[str]] = None) -> pd
     return df
 
 
-def _fetch_bod(target_date: str) -> pd.DataFrame:
+def _fetch_bod_stream(target_date: str) -> pd.DataFrame:
     """
-    Fetch Bid-Offer Data (BOD) for a given settlement date.
+    Fetch Bid-Offer Data (BOD) for a given settlement date using the
+    streaming endpoint to avoid dataset size limits.
 
-    Endpoint: ``GET {API_BASE}/datasets/BOD``
+    Endpoint: ``GET {API_BASE}/datasets/BOD/stream``
     Parameters:
         - ``from``: RFC 3339 date-time (start of settlement day, e.g. ``2026-11-17T00:00Z``)
         - ``to``:   RFC 3339 date-time (end of settlement day, e.g. ``2026-11-18T00:00Z``)
-        - ``format``: ``json``
 
-    Note: We do NOT pass ``bmUnit`` as a query param here.  Instead we fetch
-    all BOD data for the day and filter locally in pandas.  This avoids the
-    400 error caused by sending too many ``bmUnit`` query parameters at once.
-
-    Response: ``{"data": [ ... ]}``
+    Note: The ``/stream`` endpoint returns a raw JSON array ``[ ... ]``
+    directly (NOT wrapped in ``{"data": [...]}``).  This avoids the 400
+    Bad Request that the non-streaming ``/datasets/BOD`` endpoint returns
+    for full-day unfiltered queries due to Elexon's dataset size limit.
 
     Parameters
     ----------
@@ -305,7 +303,7 @@ def _fetch_bod(target_date: str) -> pd.DataFrame:
         ``bid``, ``nationalGridBmUnit``, ``bmUnit``.
         Empty DataFrame if no data returned.
     """
-    url = f"{API_BASE}/datasets/BOD"
+    url = f"{API_BASE}/datasets/BOD/stream"
 
     # Cover the full settlement day using the API's expected date format (no seconds)
     dt = datetime.strptime(target_date, "%Y-%m-%d")
@@ -316,24 +314,24 @@ def _fetch_bod(target_date: str) -> pd.DataFrame:
     params: dict = {
         "from": from_str,
         "to": to_str,
-        "format": "json",
     }
 
-    logger.info("Fetching BOD for %s (full day, no BMU filter – filtering locally)",
+    logger.info("Fetching BOD stream for %s (full day, filtering locally)",
                 target_date)
     resp = _get_with_retry(url, params=params)
     payload = resp.json()
 
-    # Unwrap the response envelope
-    if isinstance(payload, dict):
-        records = payload.get("data", [])
-    elif isinstance(payload, list):
+    # The /stream endpoint returns a raw JSON array directly
+    if isinstance(payload, list):
         records = payload
+    elif isinstance(payload, dict):
+        # Handle the wrapped case just in case
+        records = payload.get("data", [])
     else:
         records = []
 
     if not records:
-        logger.warning("BOD returned no data for %s.", target_date)
+        logger.warning("BOD stream returned no data for %s.", target_date)
         return pd.DataFrame()
 
     df = pd.DataFrame(records)
@@ -348,7 +346,7 @@ def _fetch_bod(target_date: str) -> pd.DataFrame:
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip()
 
-    logger.info("BOD returned %d total record(s) for %s.", len(df), target_date)
+    logger.info("BOD stream returned %d total record(s) for %s.", len(df), target_date)
     return df
 
 
@@ -558,9 +556,11 @@ def get_accepted_bid_prices(target_date: str, bmu_ids: list[str]) -> pd.DataFram
     """
     Retrieve the bid prices (£/MWh) for the accepted wind bids.
 
-    Queries the ``/datasets/BOD`` endpoint for the full settlement day
-    (without passing ``bmUnit`` as a query param to avoid 400 errors from
-    too many params) and filters locally to the given BMU IDs.
+    Uses the ``/datasets/BOD/stream`` endpoint (streaming) to avoid the
+    400 Bad Request that the non-streaming endpoint returns for full-day
+    unfiltered queries.  The stream endpoint returns a raw JSON array.
+
+    Filters locally to the given BMU IDs and ``pairId < 0`` (bids).
 
     The ``pairId`` in BOD corresponds directly to the BOAV pair number:
     BOAV ``negative1`` ↔ BOD ``pairId == -1``, etc.
@@ -583,10 +583,10 @@ def get_accepted_bid_prices(target_date: str, bmu_ids: list[str]) -> pd.DataFram
 
     try:
         time.sleep(API_CALL_DELAY)
-        # Fetch ALL BOD data for the day (no bmUnit filter in query params)
-        bod = _fetch_bod(target_date)
+        # Fetch ALL BOD data for the day via the streaming endpoint
+        bod = _fetch_bod_stream(target_date)
         if bod.empty:
-            logger.warning("BOD returned no data for %s.", target_date)
+            logger.warning("BOD stream returned no data for %s.", target_date)
             return empty_result
 
         if "bmUnit" not in bod.columns or "pairId" not in bod.columns:
@@ -635,6 +635,7 @@ def get_accepted_bid_prices(target_date: str, bmu_ids: list[str]) -> pd.DataFram
 def calculate_daily_wind_bid_cost(
     acceptances: pd.DataFrame,
     prices: pd.DataFrame,
+    target_date: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Calculate the daily wind curtailment bid cost.
@@ -664,6 +665,8 @@ def calculate_daily_wind_bid_cost(
         Output of :func:`get_accepted_bid_prices`.
         Must contain: ``elexonBmUnit``, ``settlementPeriod``, ``pairId``,
         ``price``.
+    target_date : str, optional
+        Settlement date for EBOCF cross-check logging.
 
     Returns
     -------
@@ -733,33 +736,19 @@ def calculate_daily_wind_bid_cost(
     # ------------------------------------------------------------------
     # EBOCF cross-check (optional, non-fatal)
     # ------------------------------------------------------------------
-    try:
-        ebocf = _fetch_ebocf(
-            target_date=merged["elexonBmUnit"].iloc[0] and _get_target_date_from_context(),
-            bmu_ids=summary["elexonBmUnit"].tolist(),
-        )
-        if not ebocf.empty and "totalCashflow" in ebocf.columns:
-            ebocf_total = ebocf["totalCashflow"].sum()
-            logger.info(
-                "EBOCF cross-check – our total: £%.2f | EBOCF total: £%.2f | diff: £%.2f",
-                total_cost, ebocf_total, total_cost - ebocf_total,
+    if target_date:
+        try:
+            ebocf = _fetch_ebocf(
+                target_date=target_date,
+                bmu_ids=summary["elexonBmUnit"].tolist(),
             )
-    except Exception as exc:
-        logger.debug("EBOCF cross-check skipped: %s", exc)
+            if not ebocf.empty and "totalCashflow" in ebocf.columns:
+                ebocf_total = pd.to_numeric(ebocf["totalCashflow"], errors="coerce").sum()
+                logger.info(
+                    "EBOCF cross-check – our total: £%.2f | EBOCF total: £%.2f | diff: £%.2f",
+                    total_cost, ebocf_total, total_cost - ebocf_total,
+                )
+        except Exception as exc:
+            logger.debug("EBOCF cross-check skipped: %s", exc)
 
     return summary
-
-
-def _get_target_date_from_context() -> str:
-    """
-    Helper to retrieve the target date for EBOCF cross-check.
-    This is a placeholder – in practice the date is passed via the main flow.
-    We use a module-level variable set during the main run.
-    """
-    return getattr(wasted_wind_calc_module, "_current_target_date", "2026-11-17")
-
-
-# Module-level reference for the helper above
-wasted_wind_calc_module = None  # type: ignore
-import sys as _sys
-wasted_wind_calc_module = _sys.modules[__name__]  # type: ignore
