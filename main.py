@@ -6,7 +6,7 @@ Replicates Module 1 of wastedwind.energy:
 
 Usage:
     python main.py
-    # Future: python main.py 2026-11-19
+    # Future: python main.py 2026-11-17
 """
 
 import sys
@@ -21,8 +21,8 @@ from wasted_wind_calc import (
 # ---------------------------------------------------------------------------
 # Date handling
 # ---------------------------------------------------------------------------
-# Active: hardcoded target date
-TARGET_DATE = "2026-11-19"
+# Active: hardcoded target date (17th November – expected output ~£620k)
+TARGET_DATE = "2026-11-17"
 
 # Commented-out: user-supplied date via CLI argument
 # if len(sys.argv) > 1:
