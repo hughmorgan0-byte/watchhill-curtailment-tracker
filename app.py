@@ -345,10 +345,11 @@ left_col, right_col = st.columns(2, gap="large")
 
 # --- Left: Unadjusted Baseline (RED) ---
 with left_col:
+    unadjusted_total = total_cost_all + module2["replacement_cost_gbp"]
     st.markdown(
         _kpi_card(
             "Unadjusted Baseline",
-            f"\u00a3{total_cost_all + module2['replacement_cost_gbp']:,.0f}",
+            f"\u00a3{unadjusted_total:,.0f}",
             sub=f"Wind \u00a3{total_cost_all:,.0f} + Replacement \u00a3{module2['replacement_cost_gbp']:,.0f}  |  {total_mwh_all:,.1f} MWh curtailed",
             variant="red",
         ),
@@ -363,7 +364,7 @@ with left_col:
     with m3:
         st.metric("Replacement Offer", f"\u00a3{module2['replacement_cost_gbp']:,.0f}")
     with m4:
-        st.metric("Combined Total", f"\u00a3{total_cost_all + module2['replacement_cost_gbp']:,.0f}")
+        st.metric("Combined Total", f"\u00a3{unadjusted_total:,.0f}")
 
 # --- Right: NIV-Adjusted (BLUE) ---
 with right_col:
@@ -488,9 +489,13 @@ with tab_wind:
         },
     )
 
+    # Extract column names to avoid backslash-in-f-string-expression issue (Python 3.11)
+    _col_mwh = "Curtailed MWh"
+    _col_cost = "Cost \u00a3"
+    _total_mwh = display_df[_col_mwh].sum()
+    _total_cost = display_df[_col_cost].sum()
     st.markdown(
-        f"**Totals:** {display_df['Curtailed MWh'].sum():.1f} MWh | "
-        f"\u00a3{display_df['Cost \u00a3'].sum():,.2f}"
+        f"**Totals:** {_total_mwh:.1f} MWh | \u00a3{_total_cost:,.2f}"
     )
 
 # --- Tab 2: Replacement Generation Mix ---
