@@ -483,7 +483,8 @@ fig.add_trace(go.Scatter(
 fig.update_layout(
     title=None,
     xaxis_title="Settlement Period",
-    yaxis=dict(title="MWh (Wind / Offer)"),
+    xaxis=dict(gridcolor="#26362D", zerolinecolor="#3B5246"),
+    yaxis=dict(title="MWh (Wind / Offer)", gridcolor="#26362D", zerolinecolor="#3B5246"),
     yaxis2=dict(
         title="NIV (MWh)",
         overlaying="y",
@@ -504,8 +505,6 @@ fig.update_layout(
     font=dict(family="Inter, Segoe UI, Helvetica Neue, Arial, sans-serif", size=12, color="#F2EBD9"),
     plot_bgcolor="#1C2922",
     paper_bgcolor="#1C2922",
-    xaxis=dict(gridcolor="#26362D", zerolinecolor="#3B5246"),
-    yaxis=dict(gridcolor="#26362D", zerolinecolor="#3B5246"),
 )
 
 st.plotly_chart(fig, use_container_width=True)
