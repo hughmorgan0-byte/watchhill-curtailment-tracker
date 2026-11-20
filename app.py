@@ -51,17 +51,17 @@ st.markdown(
 
     /* ── Typography ─────────────────────────────────────────────────── */
     h1, h2, h3, h4, h5, h6 {
-        color: #1C2922;
+        color: #F2EBD9;
         font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
         font-weight: 600;
         letter-spacing: -0.01em;
     }
     p, span, label {
         font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
-        color: #1C2922;
+        color: #F2EBD9;
     }
     .stCaption {
-        color: #5C6B62;
+        color: #8FA69A;
         font-size: 0.85rem;
     }
 
@@ -73,12 +73,12 @@ st.markdown(
         border: 1px solid;
     }
     .kpi-card-red {
-        background: #FFF5F5;
-        border-color: #E8C4C4;
+        background: #3D2222;
+        border-color: #6B3A3A;
     }
     .kpi-card-blue {
-        background: #F0F7FF;
-        border-color: #B8D4E8;
+        background: #1E2D3D;
+        border-color: #3A5A7B;
     }
     .kpi-card h4 {
         margin: 0 0 0.25rem 0;
@@ -87,82 +87,97 @@ st.markdown(
         letter-spacing: 0.06em;
         font-weight: 700;
     }
-    .kpi-card-red h4 { color: #9B2C2C; }
-    .kpi-card-blue h4 { color: #0D5C91; }
+    .kpi-card-red h4 { color: #F5C6C6; }
+    .kpi-card-blue h4 { color: #C6D9F5; }
     .kpi-card .kpi-value {
         font-size: 1.6rem;
         font-weight: 700;
         line-height: 1.2;
     }
-    .kpi-card-red .kpi-value { color: #C0392B; }
-    .kpi-card-blue .kpi-value { color: #0D5C91; }
+    .kpi-card-red .kpi-value { color: #FF6B6B; }
+    .kpi-card-blue .kpi-value { color: #6BA3FF; }
     .kpi-card .kpi-sub {
         font-size: 0.78rem;
-        color: #5C6B62;
+        color: #8FA69A;
         margin-top: 0.15rem;
     }
 
-    /* ── Section panels (Soft Sage Mint) ────────────────────────────── */
+    /* ── Section panels (Dark Forest) ───────────────────────────────── */
     .section-panel {
-        background: #EEF3F0;
-        border: 1px solid #B8C9C0;
+        background: #26362D;
+        border: 1px solid #3B5246;
         border-radius: 10px;
         padding: 1.25rem 1.5rem;
         margin-bottom: 1rem;
     }
 
-    /* ── Tabs styling (Warm Cream / Sand) ───────────────────────────── */
+    /* ── Tabs styling (Dark with Sage accent) ───────────────────────── */
     [data-testid="stTabs"] [role="tab"] {
         font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
         font-weight: 500;
-        color: #1C2922;
-        background-color: #F2EBD9;
-        border: 1px solid #EDE0C8;
+        color: #F2EBD9;
+        background-color: #26362D;
+        border: 1px solid #3B5246;
         border-radius: 6px 6px 0 0;
     }
     [data-testid="stTabs"] [aria-selected="true"] {
-        color: #3B5246;
-        background-color: #F2EBD9;
-        border-bottom: 2px solid #3B5246;
+        color: #DCE6AA;
+        background-color: #26362D;
+        border-bottom: 2px solid #DCE6AA;
     }
 
-    /* ── Dataframe styling (Soft Sage Mint border) ──────────────────── */
+    /* ── Dataframe styling (Dark) ───────────────────────────────────── */
     [data-testid="stDataFrame"] {
-        border: 1px solid #B8C9C0;
+        border: 1px solid #3B5246;
         border-radius: 8px;
     }
 
-    /* ── Buttons (Forest Green accent) ──────────────────────────────── */
+    /* ── Buttons (Light Sage accent on dark) ────────────────────────── */
     .stButton > button {
         font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
         font-weight: 600;
         border-radius: 6px;
     }
     .stButton > button[kind="primary"] {
-        background-color: #3B5246;
-        color: #FFFFFF;
+        background-color: #DCE6AA;
+        color: #1C2922;
     }
     .stButton > button[kind="primary"]:hover {
-        background-color: #2E4238;
+        background-color: #C8D494;
     }
 
-    /* ── Divider (Soft Sage Mint border) ────────────────────────────── */
+    /* ── Divider (Forest Green border) ──────────────────────────────── */
     hr {
-        border-color: #B8C9C0;
+        border-color: #3B5246;
     }
 
-    /* ── Metric cards (Soft Sage Mint) ──────────────────────────────── */
+    /* ── Metric cards (Dark Forest) ─────────────────────────────────── */
     [data-testid="stMetric"] {
-        background-color: #EEF3F0;
-        border: 1px solid #B8C9C0;
+        background-color: #26362D;
+        border: 1px solid #3B5246;
         border-radius: 8px;
         padding: 0.75rem 1rem;
     }
     [data-testid="stMetric"] label {
-        color: #5C6B62;
+        color: #8FA69A;
     }
     [data-testid="stMetric"] [data-testid="stMetricValue"] {
-        color: #1C2922;
+        color: #F2EBD9;
+    }
+
+    /* ── Info / Warning / Error boxes ───────────────────────────────── */
+    [data-testid="stAlert"] {
+        border-radius: 8px;
+    }
+    [data-testid="stAlert"] p {
+        color: #F2EBD9;
+    }
+
+    /* ── Date input ─────────────────────────────────────────────────── */
+    [data-testid="stDateInput"] input {
+        background-color: #26362D;
+        border: 1px solid #3B5246;
+        color: #F2EBD9;
     }
     </style>
     """,
@@ -441,7 +456,7 @@ fig.add_trace(go.Bar(
     x=chart_df["settlementPeriod"],
     y=chart_df["wind_curtailed_mwh"],
     name="Curtailed Wind (MWh)",
-    marker_color="#C0392B",
+    marker_color="#FF6B6B",
     opacity=0.85,
 ))
 
@@ -450,17 +465,17 @@ fig.add_trace(go.Bar(
     x=chart_df["settlementPeriod"],
     y=chart_df["required_offer_mwh"],
     name="Constraint-Required Offer (MWh)",
-    marker_color="#0D5C91",
+    marker_color="#6BA3FF",
     opacity=0.75,
 ))
 
-# Line: NIV (Olive Moss – secondary chart series)
+# Line: NIV (Light Sage – secondary chart series)
 fig.add_trace(go.Scatter(
     x=chart_df["settlementPeriod"],
     y=chart_df["niv_mwh"],
     name="Net Imbalance Volume (MWh)",
     mode="lines+markers",
-    line=dict(color="#6B7556", width=2),
+    line=dict(color="#DCE6AA", width=2),
     marker=dict(size=4),
     yaxis="y2",
 ))
@@ -476,12 +491,21 @@ fig.update_layout(
         showgrid=False,
     ),
     barmode="group",
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    legend=dict(
+        orientation="h",
+        yanchor="bottom",
+        y=1.02,
+        xanchor="right",
+        x=1,
+        font=dict(color="#F2EBD9"),
+    ),
     height=420,
     margin=dict(l=40, r=40, t=30, b=40),
-    font=dict(family="Inter, Segoe UI, Helvetica Neue, Arial, sans-serif", size=12, color="#1C2922"),
-    plot_bgcolor="#FFFFFF",
-    paper_bgcolor="#FFFFFF",
+    font=dict(family="Inter, Segoe UI, Helvetica Neue, Arial, sans-serif", size=12, color="#F2EBD9"),
+    plot_bgcolor="#1C2922",
+    paper_bgcolor="#1C2922",
+    xaxis=dict(gridcolor="#26362D", zerolinecolor="#3B5246"),
+    yaxis=dict(gridcolor="#26362D", zerolinecolor="#3B5246"),
 )
 
 st.plotly_chart(fig, use_container_width=True)
