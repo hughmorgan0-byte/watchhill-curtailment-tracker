@@ -51,21 +51,21 @@ st.markdown(
 
     /* ── Typography ─────────────────────────────────────────────────── */
     h1, h2, h3, h4, h5, h6 {
-        color: #13293D;
+        color: #1C2922;
         font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
         font-weight: 600;
         letter-spacing: -0.01em;
     }
     p, span, label {
         font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
-        color: #13293D;
+        color: #1C2922;
     }
     .stCaption {
-        color: #5A6B7A;
+        color: #5C6B62;
         font-size: 0.85rem;
     }
 
-    /* ── KPI Callout Cards ──────────────────────────────────────────── */
+    /* ── KPI Callout Cards (Red vs Blue – kept as brand highlights) ── */
     .kpi-card {
         border-radius: 10px;
         padding: 1.25rem 1.5rem;
@@ -98,45 +98,71 @@ st.markdown(
     .kpi-card-blue .kpi-value { color: #0D5C91; }
     .kpi-card .kpi-sub {
         font-size: 0.78rem;
-        color: #5A6B7A;
+        color: #5C6B62;
         margin-top: 0.15rem;
     }
 
-    /* ── Section panels ─────────────────────────────────────────────── */
+    /* ── Section panels (Soft Sage Mint) ────────────────────────────── */
     .section-panel {
-        background: #FFFFFF;
-        border: 1px solid #E2E8F0;
+        background: #EEF3F0;
+        border: 1px solid #B8C9C0;
         border-radius: 10px;
         padding: 1.25rem 1.5rem;
         margin-bottom: 1rem;
     }
 
-    /* ── Tabs styling ───────────────────────────────────────────────── */
+    /* ── Tabs styling (Warm Cream / Sand) ───────────────────────────── */
     [data-testid="stTabs"] [role="tab"] {
         font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
         font-weight: 500;
-        color: #13293D;
+        color: #1C2922;
+        background-color: #F2EBD9;
+        border: 1px solid #EDE0C8;
+        border-radius: 6px 6px 0 0;
     }
     [data-testid="stTabs"] [aria-selected="true"] {
-        color: #0D5C91;
+        color: #3B5246;
+        background-color: #F2EBD9;
+        border-bottom: 2px solid #3B5246;
     }
 
-    /* ── Dataframe styling ──────────────────────────────────────────── */
+    /* ── Dataframe styling (Soft Sage Mint border) ──────────────────── */
     [data-testid="stDataFrame"] {
-        border: 1px solid #E2E8F0;
+        border: 1px solid #B8C9C0;
         border-radius: 8px;
     }
 
-    /* ── Buttons ────────────────────────────────────────────────────── */
+    /* ── Buttons (Forest Green accent) ──────────────────────────────── */
     .stButton > button {
         font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
         font-weight: 600;
         border-radius: 6px;
     }
+    .stButton > button[kind="primary"] {
+        background-color: #3B5246;
+        color: #FFFFFF;
+    }
+    .stButton > button[kind="primary"]:hover {
+        background-color: #2E4238;
+    }
 
-    /* ── Divider ────────────────────────────────────────────────────── */
+    /* ── Divider (Soft Sage Mint border) ────────────────────────────── */
     hr {
-        border-color: #E2E8F0;
+        border-color: #B8C9C0;
+    }
+
+    /* ── Metric cards (Soft Sage Mint) ──────────────────────────────── */
+    [data-testid="stMetric"] {
+        background-color: #EEF3F0;
+        border: 1px solid #B8C9C0;
+        border-radius: 8px;
+        padding: 0.75rem 1rem;
+    }
+    [data-testid="stMetric"] label {
+        color: #5C6B62;
+    }
+    [data-testid="stMetric"] [data-testid="stMetricValue"] {
+        color: #1C2922;
     }
     </style>
     """,
@@ -410,7 +436,7 @@ chart_df = _build_period_chart_data(results)
 
 fig = go.Figure()
 
-# Bar: Curtailed Wind
+# Bar: Curtailed Wind (Red highlight)
 fig.add_trace(go.Bar(
     x=chart_df["settlementPeriod"],
     y=chart_df["wind_curtailed_mwh"],
@@ -419,7 +445,7 @@ fig.add_trace(go.Bar(
     opacity=0.85,
 ))
 
-# Bar: Required Offer (NIV-adjusted)
+# Bar: Required Offer (Blue highlight)
 fig.add_trace(go.Bar(
     x=chart_df["settlementPeriod"],
     y=chart_df["required_offer_mwh"],
@@ -428,13 +454,13 @@ fig.add_trace(go.Bar(
     opacity=0.75,
 ))
 
-# Line: NIV
+# Line: NIV (Olive Moss – secondary chart series)
 fig.add_trace(go.Scatter(
     x=chart_df["settlementPeriod"],
     y=chart_df["niv_mwh"],
     name="Net Imbalance Volume (MWh)",
     mode="lines+markers",
-    line=dict(color="#5A6B7A", width=2),
+    line=dict(color="#6B7556", width=2),
     marker=dict(size=4),
     yaxis="y2",
 ))
@@ -453,7 +479,7 @@ fig.update_layout(
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     height=420,
     margin=dict(l=40, r=40, t=30, b=40),
-    font=dict(family="Inter, Segoe UI, Helvetica Neue, Arial, sans-serif", size=12),
+    font=dict(family="Inter, Segoe UI, Helvetica Neue, Arial, sans-serif", size=12, color="#1C2922"),
     plot_bgcolor="#FFFFFF",
     paper_bgcolor="#FFFFFF",
 )
