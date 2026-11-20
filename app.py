@@ -39,18 +39,105 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    /* Remove the hamburger menu / main menu */
+    /* ── Reset Streamlit chrome ─────────────────────────────────────── */
     #MainMenu {visibility: hidden;}
-    /* Remove the footer */
     footer {visibility: hidden;}
-    /* Remove the header background for a cleaner embed */
     header[data-testid="stHeader"] {background: transparent; border-bottom: none;}
-    /* Reduce top padding so content sits higher in the iFrame */
-    .block-container {padding-top: 1.5rem; padding-bottom: 0.5rem;}
-    /* Slightly tighter spacing between elements */
-    .stMetric {margin-bottom: 0.25rem;}
-    /* Make the date input and button sit on one row */
-    div[data-testid="stHorizontalBlock"] {gap: 0.75rem;}
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 1rem;
+        max-width: 1200px;
+    }
+
+    /* ── Typography ─────────────────────────────────────────────────── */
+    h1, h2, h3, h4, h5, h6 {
+        color: #13293D;
+        font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+    }
+    p, span, label {
+        font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+        color: #13293D;
+    }
+    .stCaption {
+        color: #5A6B7A;
+        font-size: 0.85rem;
+    }
+
+    /* ── KPI Callout Cards ──────────────────────────────────────────── */
+    .kpi-card {
+        border-radius: 10px;
+        padding: 1.25rem 1.5rem;
+        margin-bottom: 0.75rem;
+        border: 1px solid;
+    }
+    .kpi-card-red {
+        background: #FFF5F5;
+        border-color: #E8C4C4;
+    }
+    .kpi-card-blue {
+        background: #F0F7FF;
+        border-color: #B8D4E8;
+    }
+    .kpi-card h4 {
+        margin: 0 0 0.25rem 0;
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        font-weight: 700;
+    }
+    .kpi-card-red h4 { color: #9B2C2C; }
+    .kpi-card-blue h4 { color: #0D5C91; }
+    .kpi-card .kpi-value {
+        font-size: 1.6rem;
+        font-weight: 700;
+        line-height: 1.2;
+    }
+    .kpi-card-red .kpi-value { color: #C0392B; }
+    .kpi-card-blue .kpi-value { color: #0D5C91; }
+    .kpi-card .kpi-sub {
+        font-size: 0.78rem;
+        color: #5A6B7A;
+        margin-top: 0.15rem;
+    }
+
+    /* ── Section panels ─────────────────────────────────────────────── */
+    .section-panel {
+        background: #FFFFFF;
+        border: 1px solid #E2E8F0;
+        border-radius: 10px;
+        padding: 1.25rem 1.5rem;
+        margin-bottom: 1rem;
+    }
+
+    /* ── Tabs styling ───────────────────────────────────────────────── */
+    [data-testid="stTabs"] [role="tab"] {
+        font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+        font-weight: 500;
+        color: #13293D;
+    }
+    [data-testid="stTabs"] [aria-selected="true"] {
+        color: #0D5C91;
+    }
+
+    /* ── Dataframe styling ──────────────────────────────────────────── */
+    [data-testid="stDataFrame"] {
+        border: 1px solid #E2E8F0;
+        border-radius: 8px;
+    }
+
+    /* ── Buttons ────────────────────────────────────────────────────── */
+    .stButton > button {
+        font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+        font-weight: 600;
+        border-radius: 6px;
+    }
+
+    /* ── Divider ────────────────────────────────────────────────────── */
+    hr {
+        border-color: #E2E8F0;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -181,9 +268,25 @@ def _build_period_chart_data(results: dict) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Helper: render a KPI callout card via raw HTML
+# ---------------------------------------------------------------------------
+def _kpi_card(label: str, value: str, sub: str = "", variant: str = "blue") -> str:
+    """Return an HTML string for a styled KPI card."""
+    cls = f"kpi-card kpi-card-{variant}"
+    sub_html = f'<div class="kpi-sub">{sub}</div>' if sub else ""
+    return (
+        f'<div class="{cls}">'
+        f'<h4>{label}</h4>'
+        f'<div class="kpi-value">{value}</div>'
+        f'{sub_html}'
+        f'</div>'
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main dashboard
 # ---------------------------------------------------------------------------
-st.title("🌬️ GB Wind Curtailment & Constraint Cost")
+st.title("GB Wind Curtailment & Constraint Cost")
 st.caption("Replicates wastedwind.energy Modules 1, 2 & 2B using Elexon BMRS data.")
 
 # --- Date selector ---
@@ -234,51 +337,73 @@ if bid_results.empty:
     st.stop()
 
 # ===================================================================
-# HEADLINE KPI COMPARISON CARDS
+# HEADLINE KPI COMPARISON CARDS  (Red vs Blue)
 # ===================================================================
 st.subheader("Headline Comparison")
 
 left_col, right_col = st.columns(2, gap="large")
 
-# --- Left: Unadjusted Baseline ---
+# --- Left: Unadjusted Baseline (RED) ---
 with left_col:
-    st.markdown("**Unadjusted Baseline** *(wastedwind.energy method)*")
-    st.markdown("---")
+    st.markdown(
+        _kpi_card(
+            "Unadjusted Baseline",
+            f"\u00a3{total_cost_all + module2['replacement_cost_gbp']:,.0f}",
+            sub=f"Wind \u00a3{total_cost_all:,.0f} + Replacement \u00a3{module2['replacement_cost_gbp']:,.0f}  |  {total_mwh_all:,.1f} MWh curtailed",
+            variant="red",
+        ),
+        unsafe_allow_html=True,
+    )
     m1, m2 = st.columns(2)
     with m1:
-        st.metric("Wind Bid Cost", f"£{total_cost_all:,.0f}")
+        st.metric("Wind Bid Cost", f"\u00a3{total_cost_all:,.0f}")
     with m2:
         st.metric("Curtailed Wind", f"{total_mwh_all:,.1f} MWh")
     m3, m4 = st.columns(2)
     with m3:
-        st.metric("Replacement Offer Cost", f"£{module2['replacement_cost_gbp']:,.0f}")
+        st.metric("Replacement Offer", f"\u00a3{module2['replacement_cost_gbp']:,.0f}")
     with m4:
-        unadjusted_total = total_cost_all + module2["replacement_cost_gbp"]
-        st.metric("Combined Total", f"£{unadjusted_total:,.0f}")
+        st.metric("Combined Total", f"\u00a3{total_cost_all + module2['replacement_cost_gbp']:,.0f}")
 
-# --- Right: NIV-Adjusted ---
+# --- Right: NIV-Adjusted (BLUE) ---
 with right_col:
-    st.markdown("**NIV-Adjusted Constraint Cost** *(Half-Hourly, Top-of-Stack)*")
-    st.markdown("---")
     if niv_result is not None:
+        niv_total = total_cost_all + niv_result["niv_adjusted_offer_cost_gbp"]
+        st.markdown(
+            _kpi_card(
+                "NIV-Adjusted Constraint Cost",
+                f"\u00a3{niv_total:,.0f}",
+                sub=f"Wind \u00a3{total_cost_all:,.0f} + NIV-Adj. \u00a3{niv_result['niv_adjusted_offer_cost_gbp']:,.0f}  |  {niv_result['total_long_market_offset_mwh']:,.1f} MWh absorbed",
+                variant="blue",
+            ),
+            unsafe_allow_html=True,
+        )
         n1, n2 = st.columns(2)
         with n1:
-            st.metric("Wind Bid Cost", f"£{total_cost_all:,.0f}")
+            st.metric("Wind Bid Cost", f"\u00a3{total_cost_all:,.0f}")
         with n2:
-            st.metric("MWh Absorbed by Long Market", f"{niv_result['total_long_market_offset_mwh']:,.1f} MWh")
+            st.metric("MWh Absorbed (NIV<0)", f"{niv_result['total_long_market_offset_mwh']:,.1f} MWh")
         n3, n4 = st.columns(2)
         with n3:
-            st.metric("NIV-Adj. Replacement Cost", f"£{niv_result['niv_adjusted_offer_cost_gbp']:,.0f}")
+            st.metric("NIV-Adj. Replacement", f"\u00a3{niv_result['niv_adjusted_offer_cost_gbp']:,.0f}")
         with n4:
-            niv_total = total_cost_all + niv_result["niv_adjusted_offer_cost_gbp"]
-            st.metric("Combined Constraint Total", f"£{niv_total:,.0f}")
+            st.metric("Combined Total", f"\u00a3{niv_total:,.0f}")
     else:
+        st.markdown(
+            _kpi_card(
+                "NIV-Adjusted Constraint Cost",
+                "N/A",
+                sub="NIV data unavailable for this date",
+                variant="blue",
+            ),
+            unsafe_allow_html=True,
+        )
         st.info("NIV data unavailable for this date.")
 
 # ===================================================================
 # HALF-HOURLY CHART
 # ===================================================================
-st.subheader("Half-Hourly Breakdown (Settlement Periods 1–48)")
+st.subheader("Half-Hourly Breakdown (Settlement Periods 1\u201348)")
 
 chart_df = _build_period_chart_data(results)
 
@@ -289,7 +414,7 @@ fig.add_trace(go.Bar(
     x=chart_df["settlementPeriod"],
     y=chart_df["wind_curtailed_mwh"],
     name="Curtailed Wind (MWh)",
-    marker_color="#2196F3",
+    marker_color="#C0392B",
     opacity=0.85,
 ))
 
@@ -298,7 +423,7 @@ fig.add_trace(go.Bar(
     x=chart_df["settlementPeriod"],
     y=chart_df["required_offer_mwh"],
     name="Constraint-Required Offer (MWh)",
-    marker_color="#FF9800",
+    marker_color="#0D5C91",
     opacity=0.75,
 ))
 
@@ -308,7 +433,7 @@ fig.add_trace(go.Scatter(
     y=chart_df["niv_mwh"],
     name="Net Imbalance Volume (MWh)",
     mode="lines+markers",
-    line=dict(color="#F44336", width=2),
+    line=dict(color="#5A6B7A", width=2),
     marker=dict(size=4),
     yaxis="y2",
 ))
@@ -327,6 +452,9 @@ fig.update_layout(
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     height=420,
     margin=dict(l=40, r=40, t=30, b=40),
+    font=dict(family="Inter, Segoe UI, Helvetica Neue, Arial, sans-serif", size=12),
+    plot_bgcolor="#FFFFFF",
+    paper_bgcolor="#FFFFFF",
 )
 
 st.plotly_chart(fig, use_container_width=True)
@@ -337,17 +465,17 @@ st.plotly_chart(fig, use_container_width=True)
 st.subheader("Detailed Breakdowns")
 
 tab_wind, tab_replacement = st.tabs([
-    "🌬️ Wind Farms Curtailed (Module 1)",
-    "⚡ Replacement Generation Mix (Module 2 & 2B)",
+    "Wind Farms Curtailed (Module 1)",
+    "Replacement Generation Mix (Module 2 & 2B)",
 ])
 
 # --- Tab 1: Wind Farms Curtailed ---
 with tab_wind:
     display_df = bid_results[["elexonBmUnit", "bmUnitName", "curtailed_mwh",
                               "avg_price", "total_cost", "is_system_flag"]].copy()
-    display_df.columns = ["BMU ID", "Name", "Curtailed MWh", "Avg £/MWh", "Cost £", "SO Flag"]
+    display_df.columns = ["BMU ID", "Name", "Curtailed MWh", "Avg \u00a3/MWh", "Cost \u00a3", "SO Flag"]
     display_df["SO Flag"] = display_df["SO Flag"].map({True: "Yes", False: "No"})
-    display_df = display_df.sort_values("Cost £", ascending=False).reset_index(drop=True)
+    display_df = display_df.sort_values("Cost \u00a3", ascending=False).reset_index(drop=True)
 
     st.dataframe(
         display_df,
@@ -355,20 +483,19 @@ with tab_wind:
         hide_index=True,
         column_config={
             "Curtailed MWh": st.column_config.NumberColumn(format="%.1f"),
-            "Avg £/MWh": st.column_config.NumberColumn(format="%.2f"),
-            "Cost £": st.column_config.NumberColumn(format="£%.2f"),
+            "Avg \u00a3/MWh": st.column_config.NumberColumn(format="%.2f"),
+            "Cost \u00a3": st.column_config.NumberColumn(format="\u00a3%.2f"),
         },
     )
 
-    # Totals row
     st.markdown(
         f"**Totals:** {display_df['Curtailed MWh'].sum():.1f} MWh | "
-        f"£{display_df['Cost £'].sum():,.2f}"
+        f"\u00a3{display_df['Cost \u00a3'].sum():,.2f}"
     )
 
 # --- Tab 2: Replacement Generation Mix ---
 with tab_replacement:
-    st.markdown("#### Module 2 – Merit-Order Fuel Breakdown")
+    st.markdown("#### Module 2 \u2013 Merit-Order Fuel Breakdown")
     fuel_2 = module2.get("fuel_breakdown", pd.DataFrame())
     if fuel_2 is not None and not fuel_2.empty:
         st.dataframe(
@@ -377,14 +504,14 @@ with tab_replacement:
             hide_index=True,
             column_config={
                 "mwh": st.column_config.NumberColumn("MWh", format="%.1f"),
-                "cost_gbp": st.column_config.NumberColumn("Cost £", format="£%.2f"),
-                "avg_price": st.column_config.NumberColumn("Avg £/MWh", format="%.2f"),
+                "cost_gbp": st.column_config.NumberColumn("Cost \u00a3", format="\u00a3%.2f"),
+                "avg_price": st.column_config.NumberColumn("Avg \u00a3/MWh", format="%.2f"),
             },
         )
     else:
         st.info("No replacement offer data available.")
 
-    st.markdown("#### Module 2B – NIV-Adjusted Fuel Breakdown")
+    st.markdown("#### Module 2B \u2013 NIV-Adjusted Fuel Breakdown")
     if niv_result is not None:
         fuel_2b = niv_result.get("fuel_breakdown", pd.DataFrame())
         if fuel_2b is not None and not fuel_2b.empty:
@@ -394,8 +521,8 @@ with tab_replacement:
                 hide_index=True,
                 column_config={
                     "mwh": st.column_config.NumberColumn("MWh", format="%.1f"),
-                    "cost_gbp": st.column_config.NumberColumn("Cost £", format="£%.2f"),
-                    "avg_price": st.column_config.NumberColumn("Avg £/MWh", format="%.2f"),
+                    "cost_gbp": st.column_config.NumberColumn("Cost \u00a3", format="\u00a3%.2f"),
+                    "avg_price": st.column_config.NumberColumn("Avg \u00a3/MWh", format="%.2f"),
                 },
             )
         else:
@@ -412,7 +539,7 @@ with tab_replacement:
             hide_index=True,
             column_config={
                 "mwh": st.column_config.NumberColumn("MWh", format="%.1f"),
-                "cost_gbp": st.column_config.NumberColumn("Cost £", format="£%.2f"),
+                "cost_gbp": st.column_config.NumberColumn("Cost \u00a3", format="\u00a3%.2f"),
             },
         )
     else:
@@ -423,6 +550,6 @@ with tab_replacement:
 # ---------------------------------------------------------------------------
 st.divider()
 st.caption(
-    f"Data source: Elexon BMRS API | Settlement date: **{results['target_date']}** | "
+    f"Data source: Elexon BMRS API  |  Settlement date: **{results['target_date']}**  |  "
     f"Pipeline cached for 1 hour."
 )
